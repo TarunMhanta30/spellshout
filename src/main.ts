@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { TitleScene } from "@scenes/TitleScene";
+import { CreatureSelectScene } from "@scenes/CreatureSelectScene";
 import { BattleScene } from "@scenes/BattleScene";
 
 const config: Phaser.Types.Core.GameConfig = {
@@ -12,9 +13,9 @@ const config: Phaser.Types.Core.GameConfig = {
     width: 960,
     height: 540,
   },
-  // BattleScene is first, so the game boots straight into its click-to-begin
-  // overlay. TitleScene stays registered for the full title→battle flow later.
-  scene: [BattleScene, TitleScene],
+  // Flow: Title (enable mic, say START) → Select (say a creature name) →
+  // Battle. The mic stays live across all three (shared VoiceModule).
+  scene: [TitleScene, CreatureSelectScene, BattleScene],
 };
 
 // eslint-disable-next-line no-new

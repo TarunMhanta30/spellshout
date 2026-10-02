@@ -30,6 +30,23 @@ export const PLAYER_SPELLS: Spell[] = [
   { name: "Bramble Snare", element: "nature", damage: 15 },
 ];
 
+/** Damage multiplier a creature gets on spells of its own element. */
+export const ELEMENT_BONUS = 1.25;
+
+export interface Creature {
+  name: string;
+  element: Element;
+  /** Texture key for the creature's sprite (also its art filename stem). */
+  textureKey: string;
+}
+
+/** The three selectable player creatures, one per element. */
+export const CREATURES: Creature[] = [
+  { name: "Cinder", element: "fire", textureKey: "fire" },
+  { name: "Ripple", element: "water", textureKey: "water" },
+  { name: "Dryad", element: "nature", textureKey: "nature" },
+];
+
 export interface Combatant {
   name: string;
   color: number;
@@ -45,7 +62,7 @@ export const PLAYER: Combatant = {
 };
 
 export const ENEMY: Combatant = {
-  name: "Umbra",
+  name: "Enemy",
   color: 0x8b5cf6,
   maxHp: 100,
   spells: [

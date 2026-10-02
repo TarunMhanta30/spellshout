@@ -1,11 +1,24 @@
 import Phaser from "phaser";
 import { VoiceModule } from "@voice/VoiceModule";
+import { sharedVoice } from "@voice/sharedVoice";
 import { Matcher } from "@matcher/Matcher";
-import { PLAYER, ENEMY, PLAYER_SPELLS, ELEMENT_COLOR, type Spell } from "@data/roster";
+import { heardCommand } from "@matcher/command";
+import { AnimationsModule, type CreatureView } from "@animations/AnimationsModule";
+import { EffectsModule } from "@effects/EffectsModule";
+import {
+  PLAYER,
+  ENEMY,
+  PLAYER_SPELLS,
+  ELEMENT_COLOR,
+  ELEMENT_BONUS,
+  CREATURES,
+  type Spell,
+  type Creature,
+} from "@data/roster";
 
 /** Confidence needed to fire a cast from a (possibly rough) interim result. */
 const CAST_THRESHOLD = 0.7;
-/** How long the big "YOUR TURN / UMBRA'S TURN" banner holds before fading. */
+/** How long the big "YOUR TURN / ENEMY'S TURN" banner holds before fading. */
 const TURN_BANNER_MS = 800;
 /** How long the enemy telegraphs its spell ("charging…") before it attacks. */
 const CHARGE_MS = 1000;
@@ -16,6 +29,11 @@ const RESOLVE_BEAT_MS = 500;
 
 /** Greyed-out alpha for the spell cards when it isn't the player's turn. */
 const CARDS_DISABLED_ALPHA = 0.28;
+
+/** Shared ground line the creatures stand on, and their on-screen height.
+ *  Chosen to sit clear of the HP bars (top) and the spell cards (y >= 436). */
+const GROUND_Y = 418;
+const CREATURE_H = 300;
 
 type Turn = "idle" | "player" | "enemy" | "result";
 
@@ -29,23 +47,27 @@ interface HpBar {
  * BattleScene — the voice-driven, turn-based duel.
  *
  * Flow: a "click to begin" overlay (one gesture to enable the mic). Each turn
- * opens with a big "YOUR TURN" / "UMBRA'S TURN" banner. On the player's turn a
+ * opens with a big "YOUR TURN" / "ENEMY'S TURN" banner. On the player's turn a
  * matched shout fires a projectile at the enemy (and only the enemy). On the
- * enemy's turn all voice is ignored, the cards grey out, Umbra telegraphs its
- * spell ("charging…") for a second, then fires back. Every hit shows a floating
+ * enemy's turn all voice is ignored, the cards grey out, the enemy telegraphs
+ * its spell ("charging…") for a second, then fires back. Every hit shows a floating
  * damage number. Repeats until one side reaches 0 HP.
  */
 export class BattleScene extends Phaser.Scene {
-  private readonly voice = new VoiceModule();
   private readonly matcher = new Matcher(
     PLAYER_SPELLS.map((s) => s.name),
     { threshold: CAST_THRESHOLD },
   );
-  // "rematch" is a short, common word — a slightly looser threshold is fine.
-  private readonly rematchMatcher = new Matcher(["rematch"], { threshold: 0.6 });
+  // Control vocabulary tolerates common mishearings and embedded phrasings.
+  private readonly rematchMatcher = new Matcher(
+    ["rematch", "re match", "play again", "again"],
+    { threshold: 0.6 },
+  );
 
   private turn: Turn = "idle";
   private castThisTurn = false;
+  /** Chosen on the select screen; its element gets the damage bonus. */
+  private chosenCreature: Creature = CREATURES[0];
 
   private playerHp = PLAYER.maxHp;
   private enemyHp = ENEMY.maxHp;
@@ -56,13 +78,19 @@ export class BattleScene extends Phaser.Scene {
 
   private resultLayer?: Phaser.GameObjects.Container;
   private rematchPrompt?: Phaser.GameObjects.Text;
+  private resultHeard?: Phaser.GameObjects.Text;
 
-  private playerShape!: Phaser.GameObjects.Rectangle;
-  private enemyShape!: Phaser.GameObjects.Rectangle;
+  private playerShape!: Phaser.GameObjects.Image;
+  private enemyShape!: Phaser.GameObjects.Image;
   private playerBaseX = 0;
   private enemyBaseX = 0;
   private playerPos = { x: 0, y: 0 };
   private enemyPos = { x: 0, y: 0 };
+
+  private anim!: AnimationsModule;
+  private effects!: EffectsModule;
+  private playerView!: CreatureView;
+  private enemyView!: CreatureView;
 
   private playerBar!: HpBar;
   private enemyBar!: HpBar;
@@ -81,32 +109,52 @@ export class BattleScene extends Phaser.Scene {
     super("Battle");
   }
 
+  init(data: { creature?: Creature }): void {
+    if (data?.creature) this.chosenCreature = data.creature;
+  }
+
+  preload(): void {
+    // Guarded so re-entry (and textures already loaded earlier) don't warn.
+    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.png");
+    if (!this.textures.exists("enemy")) this.load.image("enemy", "assets/enemy.png");
+    for (const c of CREATURES) {
+      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.png`);
+    }
+  }
+
   create(): void {
     const { width, height } = this.scale;
 
-    this.add.rectangle(0, 0, width, height, 0x14121f).setOrigin(0, 0);
+    // Arena background, scaled to cover the viewport, behind everything.
+    const bg = this.add.image(width / 2, height / 2, "arena").setOrigin(0.5).setDepth(-10);
+    bg.setScale(Math.max(width / bg.width, height / bg.height));
 
-    // Combatants.
-    this.enemyBaseX = width - 240;
-    this.enemyPos = { x: this.enemyBaseX, y: 220 };
-    this.enemyShape = this.add
-      .rectangle(this.enemyBaseX, 220, 140, 170, ENEMY.color)
-      .setStrokeStyle(3, 0x000000, 0.25);
-    this.add
-      .text(this.enemyBaseX, 320, ENEMY.name, { fontFamily: "monospace", fontSize: "18px", color: "#e9e4ff" })
-      .setOrigin(0.5, 0);
+    // Atmosphere: drifting motes + edge vignette (sits just above the arena).
+    this.effects = new EffectsModule(this);
+    this.effects.createAtmosphere(width, height);
 
-    this.playerBaseX = 240;
-    this.playerPos = { x: this.playerBaseX, y: 235 };
-    this.playerShape = this.add
-      .rectangle(this.playerBaseX, 235, 150, 150, PLAYER.color)
-      .setStrokeStyle(3, 0x000000, 0.25);
-    this.add
-      .text(this.playerBaseX, 320, PLAYER.name, { fontFamily: "monospace", fontSize: "18px", color: "#e9e4ff" })
-      .setOrigin(0.5, 0);
+    // Combatants stand on a shared ground line, between the HP bars (above)
+    // and the spell cards (below). Player on the left, enemy on the right.
+    const centerY = GROUND_Y - CREATURE_H / 2;
+
+    this.enemyBaseX = width - 235;
+    this.enemyShape = this.addCreature("enemy", this.enemyBaseX);
+    this.enemyPos = { x: this.enemyBaseX, y: centerY };
+
+    this.playerBaseX = 235;
+    this.playerShape = this.addCreature(this.chosenCreature.textureKey, this.playerBaseX);
+    this.playerPos = { x: this.playerBaseX, y: centerY };
+
+    // Bring the creatures to life: register views and start their (desynced)
+    // idle breathing. Player faces right, enemy faces left.
+    this.anim = new AnimationsModule(this);
+    this.playerView = this.anim.register(this.playerShape, 1, 0, 1);
+    this.enemyView = this.anim.register(this.enemyShape, -1, 350, 1.15);
+    this.anim.startIdle(this.playerView);
+    this.anim.startIdle(this.enemyView);
 
     // HP bars.
-    this.playerBar = this.createHpBar(50, 48, 340, PLAYER.name);
+    this.playerBar = this.createHpBar(50, 48, 340, this.chosenCreature.name);
     this.enemyBar = this.createHpBar(width - 50 - 340, 48, 340, ENEMY.name);
     this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, false);
     this.updateHpBar(this.enemyBar, this.enemyHp, ENEMY.maxHp, false);
@@ -141,15 +189,28 @@ export class BattleScene extends Phaser.Scene {
     this.debugEnabled = new URLSearchParams(window.location.search).has("debug");
     if (this.debugEnabled) this.createDebugPanel();
 
-    // Clean up recognition if the scene is torn down.
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.voice.stop());
-
-    this.showStartOverlay();
+    // The mic was enabled on the title screen and recognition is already
+    // running — just bind this scene's handler and start the first turn.
+    this.beginBattle();
   }
 
   /* --------------------------------------------------------------------- */
   /* Setup helpers                                                          */
   /* --------------------------------------------------------------------- */
+
+  /**
+   * Add a creature standing on the ground line with a soft oval shadow beneath
+   * it, scaled to CREATURE_H while keeping its aspect ratio. The shadow is
+   * drawn first so the creature's feet sit over it (grounded, not pasted on).
+   */
+  private addCreature(key: string, x: number): Phaser.GameObjects.Image {
+    const src = this.textures.get(key).getSourceImage();
+    const scale = CREATURE_H / src.height;
+    const displayW = src.width * scale;
+
+    this.add.ellipse(x, GROUND_Y, displayW * 0.72, 34, 0x000000, 0.35);
+    return this.add.image(x, GROUND_Y, key).setOrigin(0.5, 1).setScale(scale);
+  }
 
   private createHpBar(x: number, y: number, width: number, name: string): HpBar {
     const h = 18;
@@ -189,7 +250,13 @@ export class BattleScene extends Phaser.Scene {
     PLAYER_SPELLS.forEach((spell, i) => {
       const cx = margin + i * (cardW + gap) + cardW / 2;
       const cy = top + cardH / 2;
-      const bg = this.add.rectangle(cx, cy, cardW, cardH, 0x1e1b2e).setStrokeStyle(2, 0x3a3550);
+      const boosted = spell.element === this.chosenCreature.element;
+      const dmg = this.effectiveDamage(spell);
+
+      // Boosted cards get an element-coloured border to stand out.
+      const bg = this.add
+        .rectangle(cx, cy, cardW, cardH, 0x1e1b2e)
+        .setStrokeStyle(boosted ? 3 : 2, boosted ? ELEMENT_COLOR[spell.element] : 0x3a3550);
       const dot = this.add.circle(cx - cardW / 2 + 14, cy - cardH / 2 + 14, 6, ELEMENT_COLOR[spell.element]);
       const name = this.add
         .text(cx, cy - 8, spell.name.replace(" ", "\n"), {
@@ -200,14 +267,21 @@ export class BattleScene extends Phaser.Scene {
         })
         .setOrigin(0.5);
       const meta = this.add
-        .text(cx, cy + cardH / 2 - 14, `say it · ${spell.damage} dmg`, {
+        .text(cx, cy + cardH / 2 - 14, boosted ? `say it · ${dmg} dmg · +25%` : `say it · ${dmg} dmg`, {
           fontFamily: "monospace",
           fontSize: "11px",
-          color: "#9a92c7",
+          color: boosted ? "#ffd36b" : "#9a92c7",
         })
         .setOrigin(0.5);
       this.cardLayer.add([bg, dot, name, meta]);
     });
+  }
+
+  /** Spell damage after the chosen creature's same-element +25% bonus. */
+  private effectiveDamage(spell: Spell): number {
+    return spell.element === this.chosenCreature.element
+      ? Math.round(spell.damage * ELEMENT_BONUS)
+      : spell.damage;
   }
 
   /** Grey the spell cards out when it isn't the player's turn. */
@@ -216,43 +290,16 @@ export class BattleScene extends Phaser.Scene {
   }
 
   /* --------------------------------------------------------------------- */
-  /* Start overlay + voice wiring                                           */
+  /* Voice wiring                                                           */
   /* --------------------------------------------------------------------- */
-
-  private showStartOverlay(): void {
-    const { width, height } = this.scale;
-    const overlay = this.add.rectangle(0, 0, width, height, 0x000000, 0.75).setOrigin(0, 0).setDepth(100);
-    const title = this.add
-      .text(width / 2, height / 2 - 20, "Click anywhere to begin", {
-        fontFamily: "monospace",
-        fontSize: "32px",
-        color: "#e9e4ff",
-      })
-      .setOrigin(0.5)
-      .setDepth(100);
-    const sub = this.add
-      .text(width / 2, height / 2 + 24, "(enables your microphone — Chrome only)", {
-        fontFamily: "monospace",
-        fontSize: "16px",
-        color: "#9a92c7",
-      })
-      .setOrigin(0.5)
-      .setDepth(100);
-
-    this.input.once("pointerdown", () => {
-      overlay.destroy();
-      title.destroy();
-      sub.destroy();
-      this.beginBattle();
-    });
-  }
 
   private beginBattle(): void {
     if (!VoiceModule.isSupported()) {
       this.banner.setText("Web Speech API unavailable — use Chrome.");
       return;
     }
-    this.voice.start(
+    // Reuses the recognition started on the title screen (swaps the listener).
+    sharedVoice.start(
       (update) => this.onVoice(update.interim, update.final),
       (err) => this.banner.setText(`Mic error: ${err}`),
     );
@@ -265,9 +312,11 @@ export class BattleScene extends Phaser.Scene {
     // Debug panel updates on every result, even when input is being ignored.
     this.updateDebug(heard);
 
-    // On the result screen, listen only for "rematch".
+    // On the result screen, listen only for "rematch" (interim or final), and
+    // show what's being heard so it's clear the mic is live.
     if (this.turn === "result") {
-      if (interim && this.rematchMatcher.match(tailWords(interim, 3))) this.rematch();
+      this.resultHeard?.setText(`Heard: ${heard ? `“${heard}”` : "—"}`);
+      if (heardCommand(this.rematchMatcher, heard)) this.rematch();
       return;
     }
 
@@ -306,23 +355,35 @@ export class BattleScene extends Phaser.Scene {
     this.castThisTurn = true;
     this.turn = "idle";
     this.banner.setText("");
+    const dmg = this.effectiveDamage(spell);
     this.castLine.setText(`You cast ${spell.name}`);
 
-    if (!this.strongestHit || spell.damage > this.strongestHit.damage) {
-      this.strongestHit = { name: spell.name, damage: spell.damage };
+    if (!this.strongestHit || dmg > this.strongestHit.damage) {
+      this.strongestHit = { name: spell.name, damage: dmg };
     }
 
-    this.fireProjectile(this.playerPos, this.enemyPos, ELEMENT_COLOR[spell.element], () => {
-      this.enemyHp = Math.max(0, this.enemyHp - spell.damage);
-      this.updateHpBar(this.enemyBar, this.enemyHp, ENEMY.maxHp, true);
-      this.hitEffect(this.enemyShape, ENEMY.color, this.enemyBaseX);
-      this.floatingDamage(this.enemyPos, spell.damage);
+    const lethal = this.enemyHp - dmg <= 0;
 
-      if (this.enemyHp <= 0) {
-        this.showResult(true);
-        return;
-      }
-      this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+    this.anim.attack(this.playerView, () => {
+      if (lethal) this.anim.setSlowMo(0.4); // the killing blow lands in slow motion
+      this.effects.launchProjectile(spell.element, this.playerPos, this.enemyPos, PROJECTILE_MS, () => {
+        this.enemyHp = Math.max(0, this.enemyHp - dmg);
+        this.updateHpBar(this.enemyBar, this.enemyHp, ENEMY.maxHp, true);
+        this.effects.cameraHit(dmg);
+
+        if (lethal) {
+          this.anim.hit(this.enemyView, dmg, {
+            resumeIdle: false,
+            onComplete: () => {
+              this.anim.setSlowMo(1);
+              this.anim.defeat(this.enemyView, this.playerView, () => this.showResult(true));
+            },
+          });
+          return;
+        }
+        this.anim.hit(this.enemyView, dmg);
+        this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+      });
     });
   }
 
@@ -332,17 +393,20 @@ export class BattleScene extends Phaser.Scene {
     this.setCardsEnabled(false);
     this.banner.setText(`${ENEMY.name}'s turn`);
     this.heardLine.setText("Heard: — (mic paused)");
-    this.announceTurn("UMBRA'S TURN", "#b79cff");
+    this.announceTurn(`${ENEMY.name.toUpperCase()}'S TURN`, "#b79cff");
 
     const spell = Phaser.Utils.Array.GetRandom(ENEMY.spells) as Spell;
 
-    // Telegraph the attack for one second before it lands.
+    // Telegraph the attack for one second before it lands: charge text plus a
+    // glow on the enemy in its element colour.
     this.time.delayedCall(TURN_BANNER_MS, () => {
       if (this.turn !== "enemy") return;
       this.showCharge(`${ENEMY.name} is charging ${spell.name}`);
+      this.effects.chargeGlowOn(this.enemyShape, ELEMENT_COLOR[spell.element]);
       this.time.delayedCall(CHARGE_MS, () => {
         if (this.turn !== "enemy") return;
         this.hideCharge();
+        this.effects.chargeGlowOff(this.enemyShape);
         this.enemyAttack(spell);
       });
     });
@@ -350,17 +414,28 @@ export class BattleScene extends Phaser.Scene {
 
   private enemyAttack(spell: Spell): void {
     this.castLine.setText(`${ENEMY.name} cast ${spell.name}`);
-    this.fireProjectile(this.enemyPos, this.playerPos, ELEMENT_COLOR[spell.element], () => {
-      this.playerHp = Math.max(0, this.playerHp - spell.damage);
-      this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
-      this.hitEffect(this.playerShape, PLAYER.color, this.playerBaseX);
-      this.floatingDamage(this.playerPos, spell.damage);
+    const lethal = this.playerHp - spell.damage <= 0;
 
-      if (this.playerHp <= 0) {
-        this.showResult(false);
-        return;
-      }
-      this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startPlayerTurn());
+    this.anim.attack(this.enemyView, () => {
+      if (lethal) this.anim.setSlowMo(0.4);
+      this.effects.launchProjectile(spell.element, this.enemyPos, this.playerPos, PROJECTILE_MS, () => {
+        this.playerHp = Math.max(0, this.playerHp - spell.damage);
+        this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+        this.effects.cameraHit(spell.damage);
+
+        if (lethal) {
+          this.anim.hit(this.playerView, spell.damage, {
+            resumeIdle: false,
+            onComplete: () => {
+              this.anim.setSlowMo(1);
+              this.anim.defeat(this.playerView, this.enemyView, () => this.showResult(false));
+            },
+          });
+          return;
+        }
+        this.anim.hit(this.playerView, spell.damage);
+        this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startPlayerTurn());
+      });
     });
   }
 
@@ -397,66 +472,6 @@ export class BattleScene extends Phaser.Scene {
   private hideCharge(): void {
     this.tweens.killTweensOf(this.chargeText);
     this.chargeText.setAlpha(0).setScale(1);
-  }
-
-  /** Launch a projectile from caster to target, then run onHit on arrival. */
-  private fireProjectile(
-    from: { x: number; y: number },
-    to: { x: number; y: number },
-    color: number,
-    onHit: () => void,
-  ): void {
-    const bolt = this.add.circle(from.x, from.y, 12, color).setDepth(50);
-    const glow = this.add.circle(from.x, from.y, 20, color, 0.35).setDepth(49);
-    this.tweens.add({
-      targets: [bolt, glow],
-      x: to.x,
-      y: to.y,
-      duration: PROJECTILE_MS,
-      ease: "Quad.easeIn",
-      onComplete: () => {
-        bolt.destroy();
-        glow.destroy();
-        onHit();
-      },
-    });
-  }
-
-  /** Floating "-N" damage number that rises and fades over the target. */
-  private floatingDamage(at: { x: number; y: number }, amount: number): void {
-    const label = this.add
-      .text(at.x, at.y - 40, `-${amount}`, {
-        fontFamily: "monospace",
-        fontSize: "34px",
-        fontStyle: "bold",
-        color: "#ff5a5a",
-      })
-      .setOrigin(0.5)
-      .setDepth(70);
-    this.tweens.add({
-      targets: label,
-      y: at.y - 100,
-      alpha: 0,
-      duration: 850,
-      ease: "Quad.easeOut",
-      onComplete: () => label.destroy(),
-    });
-  }
-
-  /** Flash the target white and shake it to sell the hit. */
-  private hitEffect(target: Phaser.GameObjects.Rectangle, baseColor: number, baseX: number): void {
-    target.setFillStyle(0xffffff);
-    this.time.delayedCall(100, () => target.setFillStyle(baseColor));
-    this.tweens.add({
-      targets: target,
-      x: baseX + 12,
-      duration: 40,
-      yoyo: true,
-      repeat: 4,
-      onComplete: () => {
-        target.x = baseX;
-      },
-    });
   }
 
   /* --------------------------------------------------------------------- */
@@ -508,7 +523,7 @@ export class BattleScene extends Phaser.Scene {
 
     const { width, height } = this.scale;
     const cx = width / 2;
-    const winner = won ? PLAYER.name : ENEMY.name;
+    const winner = won ? this.chosenCreature.name : ENEMY.name;
     const text = (y: number, s: string, size: number, color: string, bold = false) =>
       this.add
         .text(cx, y, s, {
@@ -533,9 +548,10 @@ export class BattleScene extends Phaser.Scene {
       "#9a92c7",
     );
     this.rematchPrompt = text(height / 2 + 86, 'Say "REMATCH" to play again', 24, "#b79cff", true);
+    this.resultHeard = text(height / 2 + 128, "Heard: —", 16, "#9a92c7");
 
     this.resultLayer = this.add
-      .container(0, 0, [dim, heading, winLine, turnsLine, hitLine, this.rematchPrompt])
+      .container(0, 0, [dim, heading, winLine, turnsLine, hitLine, this.rematchPrompt, this.resultHeard])
       .setDepth(100);
 
     // Pulse the prompt so it's clearly the live call to action.
@@ -553,6 +569,7 @@ export class BattleScene extends Phaser.Scene {
     this.resultLayer?.destroy(true);
     this.resultLayer = undefined;
     this.rematchPrompt = undefined;
+    this.resultHeard = undefined;
 
     this.turn = "idle";
     this.playerHp = PLAYER.maxHp;
@@ -563,6 +580,10 @@ export class BattleScene extends Phaser.Scene {
     this.turnsTaken = 0;
     this.strongestHit = null;
     this.castLine.setText("Last cast: —");
+
+    // Restore both creatures from the defeat state (grey/toppled/faded) to idle.
+    this.anim.reset(this.playerView);
+    this.anim.reset(this.enemyView);
 
     this.startPlayerTurn();
   }

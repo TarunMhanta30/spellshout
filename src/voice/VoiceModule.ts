@@ -43,6 +43,15 @@ export class VoiceModule {
   }
 
   start(onTranscript: TranscriptListener, onError?: VoiceErrorListener): void {
+    // Already running (e.g. started on the title screen): just swap the
+    // listeners so the new scene receives transcripts, without spawning a
+    // second recognition instance.
+    if (this.listening) {
+      this.onTranscript = onTranscript;
+      this.onError = onError ?? null;
+      return;
+    }
+
     const Ctor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!Ctor) {
       onError?.("Web Speech API not supported (use Chrome).");

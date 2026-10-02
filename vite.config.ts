@@ -9,6 +9,8 @@ export default defineConfig({
       "@matcher": fileURLToPath(new URL("./src/matcher", import.meta.url)),
       "@scenes": fileURLToPath(new URL("./src/scenes", import.meta.url)),
       "@data": fileURLToPath(new URL("./src/data", import.meta.url)),
+      "@animations": fileURLToPath(new URL("./src/animations", import.meta.url)),
+      "@effects": fileURLToPath(new URL("./src/effects", import.meta.url)),
     },
   },
   server: {
