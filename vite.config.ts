@@ -8,6 +8,7 @@ export default defineConfig({
       "@audio": fileURLToPath(new URL("./src/audio", import.meta.url)),
       "@matcher": fileURLToPath(new URL("./src/matcher", import.meta.url)),
       "@scenes": fileURLToPath(new URL("./src/scenes", import.meta.url)),
+      "@data": fileURLToPath(new URL("./src/data", import.meta.url)),
     },
   },
   server: {

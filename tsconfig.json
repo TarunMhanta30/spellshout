@@ -22,7 +22,8 @@
       "@voice/*": ["src/voice/*"],
       "@audio/*": ["src/audio/*"],
       "@matcher/*": ["src/matcher/*"],
-      "@scenes/*": ["src/scenes/*"]
+      "@scenes/*": ["src/scenes/*"],
+      "@data/*": ["src/data/*"]
     }
   },
   "include": ["src"]
