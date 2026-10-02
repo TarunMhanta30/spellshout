@@ -18,9 +18,9 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        // Root page is the mic test (current milestone); game.html is the scaffold.
+        // Root page is the game; the mic test is kept as a separate page.
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
-        game: fileURLToPath(new URL("./game.html", import.meta.url)),
+        micTest: fileURLToPath(new URL("./mic-test.html", import.meta.url)),
       },
     },
   },

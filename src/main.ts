@@ -12,7 +12,9 @@ const config: Phaser.Types.Core.GameConfig = {
     width: 960,
     height: 540,
   },
-  scene: [TitleScene, BattleScene],
+  // BattleScene is first, so the game boots straight into its click-to-begin
+  // overlay. TitleScene stays registered for the full title→battle flow later.
+  scene: [BattleScene, TitleScene],
 };
 
 // eslint-disable-next-line no-new
