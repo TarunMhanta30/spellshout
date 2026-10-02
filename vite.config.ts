@@ -14,4 +14,13 @@ export default defineConfig({
     // Mic + Web Speech API require a secure context; localhost counts as secure.
     host: true,
   },
+  build: {
+    rollupOptions: {
+      input: {
+        // Root page is the mic test (current milestone); game.html is the scaffold.
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        game: fileURLToPath(new URL("./game.html", import.meta.url)),
+      },
+    },
+  },
 });
