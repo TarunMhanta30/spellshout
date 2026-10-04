@@ -5,7 +5,8 @@ import { matchCommand } from "@matcher/command";
 import { AnimationsModule, type CreatureView } from "@animations/AnimationsModule";
 import { EffectsModule } from "@effects/EffectsModule";
 import { placeCreature } from "@sprites/creatureSprite";
-import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
+import { sharedSound } from "@audio/sharedSound";
+import { handleGlobalVoice } from "@voice/globalVoice";
 import { CREATURES, ELEMENT_COLOR, type Creature } from "@data/roster";
 
 const GROUND_Y = 360;
@@ -105,7 +106,7 @@ export class CreatureSelectScene extends Phaser.Scene {
   }
 
   private onPhrase(text: string): void {
-    if (handleSoundCommand(text)) return;
+    if (handleGlobalVoice(text)) return;
     if (this.chosen || !text) return;
 
     const result = matchCommand(this.matcher, text);

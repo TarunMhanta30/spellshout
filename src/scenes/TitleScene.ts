@@ -2,7 +2,8 @@ import Phaser from "phaser";
 import { VoiceModule } from "@voice/VoiceModule";
 import { inputRouter } from "@voice/InputRouter";
 import { sharedAudio } from "@audio/sharedAudio";
-import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
+import { sharedSound } from "@audio/sharedSound";
+import { handleGlobalVoice } from "@voice/globalVoice";
 import { Matcher } from "@matcher/Matcher";
 import { heardCommand, matchCommand } from "@matcher/command";
 
@@ -77,6 +78,14 @@ export class TitleScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
+    this.add
+      .text(width / 2, height - 28, 'Precision mode: say "WHISPER MODE" to cast with Wispr Flow', {
+        fontFamily: "monospace",
+        fontSize: "14px",
+        color: "#b79cff",
+      })
+      .setOrigin(0.5);
+
     // "Wispr Flow mode" badge, shown while that engine is active.
     this.badge = this.add
       .text(width / 2, 40, "Wispr Flow mode", {
@@ -113,7 +122,7 @@ export class TitleScene extends Phaser.Scene {
 
   private onPhrase(text: string): void {
     if (!text) return;
-    if (handleSoundCommand(text)) return;
+    if (handleGlobalVoice(text)) return;
 
     // Engine toggle (works via whichever engine is currently listening).
     const mode = matchCommand(this.modeMatcher, text);
@@ -128,7 +137,7 @@ export class TitleScene extends Phaser.Scene {
     if (this.started) return;
     if (heardCommand(this.startMatcher, text)) {
       this.started = true;
-      this.scene.start("Select");
+      this.scene.start("HowTo");
     }
   }
 

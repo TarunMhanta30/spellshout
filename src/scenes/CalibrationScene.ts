@@ -3,7 +3,8 @@ import { inputRouter } from "@voice/InputRouter";
 import { Matcher } from "@matcher/Matcher";
 import { matchCommand } from "@matcher/command";
 import { sharedAudio } from "@audio/sharedAudio";
-import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
+import { sharedSound } from "@audio/sharedSound";
+import { handleGlobalVoice } from "@voice/globalVoice";
 import { type Creature } from "@data/roster";
 
 /**
@@ -78,7 +79,7 @@ export class CalibrationScene extends Phaser.Scene {
   }
 
   private onPhrase(text: string): void {
-    if (handleSoundCommand(text)) return;
+    if (handleGlobalVoice(text)) return;
     if (this.done || !text) return;
     if (matchCommand(this.readyMatcher, text)) this.finish();
   }

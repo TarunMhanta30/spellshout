@@ -8,7 +8,8 @@ import { EffectsModule } from "@effects/EffectsModule";
 import { placeCreature, GROUND_Y, CREATURE_H } from "@sprites/creatureSprite";
 import { scoreUltimate } from "@data/ultimate";
 import { sharedAudio } from "@audio/sharedAudio";
-import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
+import { sharedSound } from "@audio/sharedSound";
+import { handleGlobalVoice } from "@voice/globalVoice";
 import { powerMultiplier, gaugeFill, GAUGE_TOP_RATIO, type PowerResult } from "@data/power";
 import {
   PLAYER_SPELLS,
@@ -186,6 +187,13 @@ export class BattleScene extends Phaser.Scene {
   // Run stats, shown on the result screen.
   private turnsTaken = 0;
   private strongestHit: { name: string; damage: number } | null = null;
+  // Score components.
+  private scoreDamage = 0;
+  private scoreCrits = 0;
+  private scoreSuperEff = 0;
+  private wisprCasts = 0;
+  private runStartTime = 0;
+  private wisprCountText?: Phaser.GameObjects.Text;
 
   private resultLayer?: Phaser.GameObjects.Container;
   private rematchPrompt?: Phaser.GameObjects.Text;
@@ -323,7 +331,20 @@ export class BattleScene extends Phaser.Scene {
         })
         .setOrigin(1, 0)
         .setDepth(80);
+      // Live count of words Wispr Flow typed this run.
+      this.wisprCountText = this.add
+        .text(width - 8, 28, "Wispr words: 0", { fontFamily: "monospace", fontSize: "12px", color: "#b79cff" })
+        .setOrigin(1, 0)
+        .setDepth(80);
     }
+
+    // Score / run timing (reset per fresh battle).
+    this.runStartTime = this.time.now;
+    this.scoreDamage = 0;
+    this.scoreCrits = 0;
+    this.scoreSuperEff = 0;
+    this.wisprCasts = 0;
+    inputRouter.resetWisprWords();
 
     // Dark translucent panel for the heard / last-cast lines. Placed BEHIND the
     // creatures (negative depth) so it never covers them; the text sits above
@@ -428,6 +449,28 @@ export class BattleScene extends Phaser.Scene {
       this.tweens.add({ targets: crit, scale: 1, duration: 200, ease: "Back.easeOut" });
       this.tweens.add({ targets: crit, alpha: 0, delay: 800, duration: 450, onComplete: () => crit.destroy() });
     }
+  }
+
+  /* --------------------------------------------------------------------- */
+  /* Score                                                                  */
+  /* --------------------------------------------------------------------- */
+
+  private recordHit(dmg: number, crit: boolean, superEff: boolean): void {
+    this.scoreDamage += dmg;
+    if (crit) this.scoreCrits += 1;
+    if (superEff) this.scoreSuperEff += 1;
+  }
+
+  private countCast(): void {
+    if (inputRouter.getMode() === "wispr") this.wisprCasts += 1;
+  }
+
+  /** Score from damage, crits, super-effective hits, enemies beaten and time. */
+  private computeScore(): number {
+    const elapsed = (this.time.now - this.runStartTime) / 1000;
+    const timeBonus = Math.max(0, Math.round(480 - elapsed)) * 3;
+    const score = this.scoreDamage + this.scoreCrits * 100 + this.scoreSuperEff * 50 + this.defeatedCount * 500 + timeBonus;
+    return Math.max(0, Math.round(score));
   }
 
   /* --------------------------------------------------------------------- */
@@ -886,10 +929,11 @@ export class BattleScene extends Phaser.Scene {
   private onPhrase(text: string, canCast: boolean): void {
     // Ignore input while the game's own sound could bleed into the mic.
     if (sharedSound.isInputBlocked()) return;
-    if (handleSoundCommand(text)) return;
+    if (handleGlobalVoice(text)) return;
 
     // Debug panel updates on every phrase, even when input is being ignored.
     this.updateDebug(text);
+    this.wisprCountText?.setText(`Wispr words: ${inputRouter.getWisprWords()}`);
 
     // On the result screen, listen only for "rematch", and show what's heard.
     if (this.turn === "result") {
@@ -980,6 +1024,7 @@ export class BattleScene extends Phaser.Scene {
   /** Cast two spells at once: combined damage × COMBO_BONUS, with a banner. */
   private comboCast(a: Spell, b: Spell): void {
     this.castThisTurn = true;
+    this.countCast();
     this.turn = "idle";
     this.banner.setText("");
     this.pendingSpells = [];
@@ -1025,6 +1070,7 @@ export class BattleScene extends Phaser.Scene {
             this.showPower(power);
             if (quick > 1) this.showQuick();
             if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
+            this.recordHit(dmg, power.crit, superEff);
             this.addUltCharge(ULT_CHARGE_PER_HIT);
 
             if (lethal) {
@@ -1065,6 +1111,7 @@ export class BattleScene extends Phaser.Scene {
   private fireUltimate(): void {
     if (!this.ultInput) return;
     this.ultInput = false;
+    this.countCast();
     this.ultTimer?.remove();
     this.ultTimer = undefined;
 
@@ -1100,6 +1147,7 @@ export class BattleScene extends Phaser.Scene {
             this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
             this.effects.cameraHit(dmg);
             sharedSound.impact(dmg);
+            this.recordHit(dmg, false, false);
 
             if (lethal) {
               this.defeatedCount += 1;
@@ -1200,6 +1248,7 @@ export class BattleScene extends Phaser.Scene {
   /** A player cast only ever damages the enemy. */
   private playerCast(spell: Spell): void {
     this.castThisTurn = true;
+    this.countCast();
     this.turn = "idle";
     this.banner.setText("");
 
@@ -1241,6 +1290,7 @@ export class BattleScene extends Phaser.Scene {
         this.showPower(power);
         if (quick > 1) this.showQuick();
         if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
+        this.recordHit(dmg, power.crit, superEff);
         this.addUltCharge(ULT_CHARGE_PER_HIT); // landing a hit charges the ultimate
 
         if (lethal) {
@@ -1693,9 +1743,26 @@ export class BattleScene extends Phaser.Scene {
 
     const { width, height } = this.scale;
     const cx = width / 2;
-    const subtitle = won
-      ? "Gauntlet cleared!"
-      : `Enemies beaten: ${this.defeatedCount} / ${this.gauntlet.length}`;
+    const h = height;
+    const subtitle = won ? "Gauntlet cleared!" : `Enemies beaten: ${this.defeatedCount} / ${this.gauntlet.length}`;
+    const standing = this.party.filter((m) => !m.fainted).length;
+
+    const score = this.computeScore();
+    let best = 0;
+    try {
+      best = parseInt(localStorage.getItem("spellshout-best") ?? "0", 10) || 0;
+    } catch {
+      /* ignore */
+    }
+    const newBest = score > best;
+    if (newBest) {
+      try {
+        localStorage.setItem("spellshout-best", String(score));
+      } catch {
+        /* ignore */
+      }
+    }
+
     const text = (y: number, s: string, size: number, color: string, bold = false) =>
       this.add
         .text(cx, y, s, {
@@ -1707,24 +1774,34 @@ export class BattleScene extends Phaser.Scene {
         })
         .setOrigin(0.5);
 
-    const dim = this.add.rectangle(0, 0, width, height, 0x000000, 0.82).setOrigin(0, 0);
-    const heading = text(height / 2 - 120, won ? "VICTORY" : "DEFEAT", 76, won ? "#58e39b" : "#ff6b4a", true);
-    const winLine = text(height / 2 - 52, subtitle, 22, "#e9e4ff");
-    const turnsLine = text(height / 2 - 14, `Turns taken: ${this.turnsTaken}`, 18, "#9a92c7");
-    const hitLine = text(
-      height / 2 + 16,
-      this.strongestHit
-        ? `Strongest hit: ${this.strongestHit.name} (-${this.strongestHit.damage})`
-        : "Strongest hit: —",
-      18,
-      "#9a92c7",
-    );
-    this.rematchPrompt = text(height / 2 + 86, 'Say "REMATCH" to play again', 24, "#b79cff", true);
-    this.resultHeard = text(height / 2 + 128, "Heard: —", 16, "#9a92c7");
+    const dim = this.add.rectangle(0, 0, width, height, 0x000000, 0.84).setOrigin(0, 0);
+    const lines: Phaser.GameObjects.GameObject[] = [dim];
+    lines.push(text(h / 2 - 132, won ? "VICTORY" : "DEFEAT", 72, won ? "#58e39b" : "#ff6b4a", true));
+    lines.push(text(h / 2 - 76, subtitle, 22, "#e9e4ff"));
+    lines.push(text(h / 2 - 48, `Creatures standing: ${standing} / ${this.party.length}`, 16, "#9a92c7"));
+    lines.push(text(h / 2 - 18, `Score: ${score}${newBest ? "    ★ NEW BEST" : `    (best ${best})`}`, 22, newBest ? "#ffd36b" : "#e9e4ff", newBest));
 
-    this.resultLayer = this.add
-      .container(0, 0, [dim, heading, winLine, turnsLine, hitLine, this.rematchPrompt, this.resultHeard])
-      .setDepth(100);
+    let y = h / 2 + 12;
+    if (inputRouter.getMode() === "wispr") {
+      lines.push(text(y, `Spells cast with Wispr Flow: ${this.wisprCasts}`, 16, "#b79cff"));
+      y += 24;
+    }
+    lines.push(
+      text(
+        y,
+        this.strongestHit
+          ? `Strongest hit: ${this.strongestHit.name} (-${this.strongestHit.damage})  ·  ${this.turnsTaken} turns`
+          : `${this.turnsTaken} turns`,
+        15,
+        "#9a92c7",
+      ),
+    );
+
+    this.rematchPrompt = text(h / 2 + 98, 'Say "REMATCH" to play again', 24, "#b79cff", true);
+    this.resultHeard = text(h / 2 + 136, "Heard: —", 15, "#9a92c7");
+    lines.push(this.rematchPrompt, this.resultHeard);
+
+    this.resultLayer = this.add.container(0, 0, lines).setDepth(100);
 
     // Pulse the prompt so it's clearly the live call to action.
     this.tweens.add({
@@ -1755,6 +1832,12 @@ export class BattleScene extends Phaser.Scene {
     this.turnsTaken = 0;
     this.defeatedCount = 0;
     this.strongestHit = null;
+    this.scoreDamage = 0;
+    this.scoreCrits = 0;
+    this.scoreSuperEff = 0;
+    this.wisprCasts = 0;
+    this.runStartTime = this.time.now;
+    inputRouter.resetWisprWords();
     this.ultInput = false;
     this.ultTimer?.remove();
     this.ultTimer = undefined;

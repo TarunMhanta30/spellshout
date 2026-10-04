@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { TitleScene } from "@scenes/TitleScene";
+import { HowToScene } from "@scenes/HowToScene";
 import { CreatureSelectScene } from "@scenes/CreatureSelectScene";
 import { CalibrationScene } from "@scenes/CalibrationScene";
 import { BattleScene } from "@scenes/BattleScene";
@@ -22,7 +23,7 @@ const config: Phaser.Types.Core.GameConfig = {
   // Battle. The mic stays live across all three (shared VoiceModule).
   scene: lineup
     ? [LineupScene]
-    : [TitleScene, CreatureSelectScene, CalibrationScene, BattleScene],
+    : [TitleScene, HowToScene, CreatureSelectScene, CalibrationScene, BattleScene],
 };
 
 // eslint-disable-next-line no-new

@@ -28,9 +28,19 @@ class InputRouter {
   private handler?: PhraseHandler;
   private onError?: (error: string) => void;
   private readonly modeListeners = new Set<(mode: InputMode) => void>();
+  private wisprWords = 0;
 
   getMode(): InputMode {
     return this.mode;
+  }
+
+  /** Total words Wispr Flow typed this run. */
+  getWisprWords(): number {
+    return this.wisprWords;
+  }
+
+  resetWisprWords(): void {
+    this.wisprWords = 0;
   }
 
   onModeChange(cb: (mode: InputMode) => void): () => void {
@@ -62,7 +72,12 @@ class InputRouter {
     } else {
       // Wispr Mode: Chrome recognition off; the text bar drives input.
       sharedVoice.stop();
-      if (!this.wispr) this.wispr = new WisprInput((text) => this.handler?.(text, true));
+      if (!this.wispr) {
+        this.wispr = new WisprInput((text) => {
+          this.wisprWords += text.trim().split(/\s+/).filter(Boolean).length;
+          this.handler?.(text, true);
+        });
+      }
       this.wispr.show();
     }
   }
