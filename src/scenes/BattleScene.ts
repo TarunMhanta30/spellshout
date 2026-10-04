@@ -209,6 +209,9 @@ export class BattleScene extends Phaser.Scene {
   private resultLayer?: Phaser.GameObjects.Container;
   private rematchPrompt?: Phaser.GameObjects.Text;
   private resultHeard?: Phaser.GameObjects.Text;
+  /** Loose objects from the victory cinematic (jumping party, NEW BEST pop),
+   *  cleared on rematch so they don't linger into the next run. */
+  private victoryExtras: Phaser.GameObjects.GameObject[] = [];
 
   private playerShape!: Phaser.GameObjects.Image;
   private enemyShape!: Phaser.GameObjects.Image;
@@ -351,9 +354,10 @@ export class BattleScene extends Phaser.Scene {
         })
         .setOrigin(1, 0)
         .setDepth(80);
-      // Live count of words Wispr Flow typed this run.
+      // Live count of words Wispr Flow typed this run. Sits below the enemy HP
+      // bar so it never overlaps the enemy's name (which is up at y≈28).
       this.wisprCountText = this.add
-        .text(width - 8, 28, "Wispr words: 0", { fontFamily: "monospace", fontSize: "12px", color: "#b79cff" })
+        .text(width - 8, 74, "Wispr words: 0", { fontFamily: "monospace", fontSize: "12px", color: "#b79cff" })
         .setOrigin(1, 0)
         .setDepth(80);
     }
@@ -1517,6 +1521,7 @@ export class BattleScene extends Phaser.Scene {
       });
       image.setDepth(101);
       shadow.setDepth(100);
+      this.victoryExtras.push(image, shadow);
       const baseY = image.y;
       this.tweens.add({
         targets: image,
@@ -2069,6 +2074,7 @@ export class BattleScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(102)
       .setScale(0.3);
+    this.victoryExtras.push(label);
     this.tweens.add({ targets: label, scale: 1, duration: 260, ease: "Back.easeOut" });
     this.tweens.add({
       targets: label,
@@ -2100,6 +2106,12 @@ export class BattleScene extends Phaser.Scene {
     this.resultLayer = undefined;
     this.rematchPrompt = undefined;
     this.resultHeard = undefined;
+    // Clear any leftover victory-cinematic objects (jumping party, NEW BEST pop).
+    this.victoryExtras.forEach((o) => {
+      this.tweens.killTweensOf(o);
+      o.destroy();
+    });
+    this.victoryExtras = [];
 
     this.turn = "idle";
     // Reset the whole party and return to the chosen starter.
