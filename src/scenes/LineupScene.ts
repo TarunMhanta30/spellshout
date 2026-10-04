@@ -17,12 +17,12 @@ export class LineupScene extends Phaser.Scene {
 
   preload(): void {
     this.load.on("loaderror", () => {});
-    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.png");
+    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.webp");
     for (const c of CREATURES) {
-      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.png`);
+      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.webp`);
     }
     for (const e of [...GAUNTLET_MIDS, BOSS]) {
-      if (!this.textures.exists(e.textureKey)) this.load.image(e.textureKey, `assets/${e.textureKey}.png`);
+      if (!this.textures.exists(e.textureKey)) this.load.image(e.textureKey, `assets/${e.textureKey}.webp`);
     }
   }
 

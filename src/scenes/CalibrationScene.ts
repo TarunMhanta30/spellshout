@@ -31,7 +31,7 @@ export class CalibrationScene extends Phaser.Scene {
   }
 
   preload(): void {
-    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.png");
+    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.webp");
   }
 
   create(): void {

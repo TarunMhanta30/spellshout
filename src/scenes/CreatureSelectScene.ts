@@ -35,9 +35,9 @@ export class CreatureSelectScene extends Phaser.Scene {
   }
 
   preload(): void {
-    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.png");
+    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.webp");
     for (const c of CREATURES) {
-      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.png`);
+      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.webp`);
     }
   }
 

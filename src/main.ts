@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { PreloadScene } from "@scenes/PreloadScene";
 import { TitleScene } from "@scenes/TitleScene";
 import { HowToScene } from "@scenes/HowToScene";
 import { CreatureSelectScene } from "@scenes/CreatureSelectScene";
@@ -19,11 +20,12 @@ const config: Phaser.Types.Core.GameConfig = {
     width: 960,
     height: 540,
   },
-  // Flow: Title (enable mic, say START) → Select (say a creature name) →
-  // Battle. The mic stays live across all three (shared VoiceModule).
+  // Flow: Preload (load all art behind a progress bar) → Title (enable mic, say
+  // START) → Select (say a creature name) → Battle. The mic stays live across
+  // all three (shared VoiceModule).
   scene: lineup
     ? [LineupScene]
-    : [TitleScene, HowToScene, CreatureSelectScene, CalibrationScene, BattleScene],
+    : [PreloadScene, TitleScene, HowToScene, CreatureSelectScene, CalibrationScene, BattleScene],
 };
 
 // eslint-disable-next-line no-new

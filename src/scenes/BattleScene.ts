@@ -251,14 +251,14 @@ export class BattleScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // A missing sprite (e.g. cinderjaw.png) just falls back at spawn time.
+    // A missing sprite (e.g. cinderjaw.webp) just falls back at spawn time.
     this.load.on("loaderror", () => {});
-    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.png");
+    if (!this.textures.exists("arena")) this.load.image("arena", "assets/arena.webp");
     for (const c of CREATURES) {
-      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.png`);
+      if (!this.textures.exists(c.textureKey)) this.load.image(c.textureKey, `assets/${c.textureKey}.webp`);
     }
     for (const e of [...GAUNTLET_MIDS, BOSS]) {
-      if (!this.textures.exists(e.textureKey)) this.load.image(e.textureKey, `assets/${e.textureKey}.png`);
+      if (!this.textures.exists(e.textureKey)) this.load.image(e.textureKey, `assets/${e.textureKey}.webp`);
     }
   }
 
@@ -921,7 +921,7 @@ export class BattleScene extends Phaser.Scene {
     }
 
     // Spawn sprite (fall back to the element's creature art if the file is
-    // missing, e.g. cinderjaw.png).
+    // missing, e.g. cinderjaw.webp).
     const key = this.textures.exists(this.enemyDef.textureKey)
       ? this.enemyDef.textureKey
       : this.fallbackTexture(this.enemyDef.element);
