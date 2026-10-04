@@ -2,6 +2,7 @@ import Phaser from "phaser";
 import { inputRouter } from "@voice/InputRouter";
 import { Matcher } from "@matcher/Matcher";
 import { heardCommand, matchCommand } from "@matcher/command";
+import { detectSpellNames } from "@matcher/detectSpells";
 import { AnimationsModule, type CreatureView } from "@animations/AnimationsModule";
 import { EffectsModule } from "@effects/EffectsModule";
 import { placeCreature, GROUND_Y, CREATURE_H } from "@sprites/creatureSprite";
@@ -55,7 +56,8 @@ const ULT_COMMIT_MS = 1200;
 /** Combo: damage multiplier when two spell names arrive together, and how long
  *  a lone spell waits for a second to be chained before casting on its own. */
 const COMBO_BONUS = 1.5;
-const CAST_WINDOW_MS = 800;
+/** After the first spell is heard, wait this long for a second (combo). */
+const COMBO_WAIT_MS = 700;
 
 /** Shout Power gauge geometry (vertical bar beside the player). */
 const GAUGE_X = 38;
@@ -98,10 +100,11 @@ interface HpBar {
  * damage number. Repeats until one side reaches 0 HP.
  */
 export class BattleScene extends Phaser.Scene {
-  private readonly matcher = new Matcher(
+  private matcher = new Matcher(
     PLAYER_SPELLS.map((s) => s.name),
     { threshold: CAST_THRESHOLD },
   );
+  private spellNames: string[] = PLAYER_SPELLS.map((s) => s.name);
   // Control vocabulary tolerates common mishearings and embedded phrasings.
   private readonly rematchMatcher = new Matcher(
     ["rematch", "re match", "play again", "again"],
@@ -110,8 +113,9 @@ export class BattleScene extends Phaser.Scene {
 
   private turn: Turn = "idle";
   private castThisTurn = false;
-  // A lone spell waits briefly for a second (to form a combo) before it casts.
-  private pendingSpell?: Spell;
+  // Spells heard this window accumulate; a lone one casts after COMBO_WAIT_MS,
+  // two cast as a combo.
+  private pendingSpells: Spell[] = [];
   private pendingTimer?: Phaser.Time.TimerEvent;
   /** Chosen on the select screen; its element gets the damage bonus. */
   private chosenCreature: Creature = CREATURES[0];
@@ -264,7 +268,11 @@ export class BattleScene extends Phaser.Scene {
       .rectangle(GAUGE_X, GAUGE_BOTTOM, GAUGE_W, GAUGE_H, 0x0f0d18)
       .setOrigin(0, 1)
       .setStrokeStyle(1, 0x3a3550);
-    this.powerFill = this.add.rectangle(GAUGE_X + 1, GAUGE_BOTTOM - 1, GAUGE_W - 2, 0, 0x58e39b).setOrigin(0, 1);
+    // Full-height fill anchored at the bottom; scaleY fills it from the bottom up.
+    this.powerFill = this.add
+      .rectangle(GAUGE_X + 1, GAUGE_BOTTOM - 1, GAUGE_W - 2, GAUGE_H - 2, 0x58e39b)
+      .setOrigin(0, 1)
+      .setScale(1, 0);
     // Baseline marker (where "normal" sits) and a shout line near the top.
     const baseY = GAUGE_BOTTOM - (GAUGE_H / GAUGE_TOP_RATIO);
     this.add.rectangle(GAUGE_X, baseY, GAUGE_W + 6, 2, 0x9a92c7).setOrigin(0, 0.5);
@@ -277,9 +285,9 @@ export class BattleScene extends Phaser.Scene {
     // Start the quiet ambient drone (continuous; exempt from the bleed window).
     sharedSound.startDrone();
 
-    // Status text.
+    // Status text — below the progress icons (top) and HP bars so nothing overlaps.
     this.banner = this.add
-      .text(width / 2, 18, "", { fontFamily: "monospace", fontSize: "22px", color: "#e9e4ff" })
+      .text(width / 2, 82, "", { fontFamily: "monospace", fontSize: "22px", color: "#e9e4ff" })
       .setOrigin(0.5, 0);
 
     if (inputRouter.getMode() === "wispr") {
@@ -300,16 +308,16 @@ export class BattleScene extends Phaser.Scene {
     // creatures (negative depth) so it never covers them; the text sits above
     // them (depth 6) and stays legible in the gap between the combatants.
     this.add
-      .rectangle(width / 2, 376, 520, 60, 0x000000, 0.55)
+      .rectangle(width / 2, 348, 520, 60, 0x000000, 0.55)
       .setStrokeStyle(1, 0x3a3550)
       .setOrigin(0.5)
       .setDepth(-3);
     this.heardLine = this.add
-      .text(width / 2, 354, "Heard: —", { fontFamily: "monospace", fontSize: "17px", color: "#9a92c7" })
+      .text(width / 2, 326, "Heard: —", { fontFamily: "monospace", fontSize: "17px", color: "#9a92c7" })
       .setOrigin(0.5, 0)
       .setDepth(6);
     this.castLine = this.add
-      .text(width / 2, 380, "Last cast: —", { fontFamily: "monospace", fontSize: "17px", color: "#d7e358" })
+      .text(width / 2, 352, "Last cast: —", { fontFamily: "monospace", fontSize: "17px", color: "#d7e358" })
       .setOrigin(0.5, 0)
       .setDepth(6);
     this.clearStatusLines();
@@ -351,7 +359,7 @@ export class BattleScene extends Phaser.Scene {
       if (l > this.peakLoudness) this.peakLoudness = l;
       fill = gaugeFill(l, this.baseline());
     }
-    this.powerFill.height = Math.max(0, (GAUGE_H - 2) * fill);
+    this.powerFill.scaleY = Math.max(0, Math.min(1, fill));
     this.powerFill.setFillStyle(fill >= 1 ? 0xff6bd6 : fill >= 0.65 ? 0xffd36b : 0x58e39b);
     this.powerTrack.setAlpha(this.turn === "player" ? 1 : 0.45);
   }
@@ -442,7 +450,7 @@ export class BattleScene extends Phaser.Scene {
     const count = PLAYER_SPELLS.length;
     const cardW = (width - margin * 2 - gap * (count - 1)) / count;
     const cardH = 84;
-    const top = 436;
+    const top = 408; // lifted so the bottom Wispr bar never covers the cards
 
     PLAYER_SPELLS.forEach((spell, i) => {
       const cx = margin + i * (cardW + gap) + cardW / 2;
@@ -750,56 +758,39 @@ export class BattleScene extends Phaser.Scene {
     // cast twice and a stale transcript can't re-trigger.
     if (this.castThisTurn || !canCast || !text) return;
 
-    const spells = this.detectSpells(text);
-    if (spells.length >= 2) {
-      // Two spell names in the text → combo now.
+    // Accumulate distinct spells heard this window (so two names arriving in
+    // separate Chrome interim segments still form a combo).
+    for (const s of this.detectSpells(text)) {
+      if (!this.pendingSpells.some((p) => p.name === s.name)) this.pendingSpells.push(s);
+    }
+    if (this.pendingSpells.length === 0) return;
+
+    if (this.pendingSpells.length >= 2) {
       this.pendingTimer?.remove();
       this.pendingTimer = undefined;
-      this.comboCast(spells[0], spells[1]);
-    } else if (spells.length === 1) {
-      // Hold the lone spell briefly in case a second is chained into a combo.
-      this.pendingSpell = spells[0];
-      if (!this.pendingTimer) {
-        this.pendingTimer = this.time.delayedCall(CAST_WINDOW_MS, () => this.commitSingle());
-      }
+      const [a, b] = this.pendingSpells;
+      this.pendingSpells = [];
+      this.comboCast(a, b);
+    } else if (!this.pendingTimer) {
+      // One so far — wait COMBO_WAIT_MS for a second name before casting it.
+      this.pendingTimer = this.time.delayedCall(COMBO_WAIT_MS, () => this.commitPending());
     }
   }
 
-  private commitSingle(): void {
+  private commitPending(): void {
     this.pendingTimer = undefined;
-    const spell = this.pendingSpell;
-    this.pendingSpell = undefined;
-    if (spell && !this.castThisTurn && this.turn === "player" && !this.ultInput) this.playerCast(spell);
+    const spells = this.pendingSpells;
+    this.pendingSpells = [];
+    if (this.castThisTurn || this.turn !== "player" || this.ultInput || spells.length === 0) return;
+    if (spells.length >= 2) this.comboCast(spells[0], spells[1]);
+    else this.playerCast(spells[0]);
   }
 
-  /** Distinct spell names found in the text, in order (scanning 2–3 word
-   *  windows), so one phrase can yield a combo of two. */
+  /** Distinct spells found in the text (scans 2–3 word windows via the shared
+   *  detector), excluding any spell sealed by Root. */
   private detectSpells(text: string): Spell[] {
-    const words = text.trim().split(/\s+/).filter(Boolean);
-    const hits: { spell: Spell; start: number; end: number; conf: number }[] = [];
-    for (let i = 0; i < words.length; i++) {
-      for (const size of [2, 3]) {
-        if (i + size > words.length) continue;
-        const r = this.matcher.match(words.slice(i, i + size).join(" "));
-        const spell = r && PLAYER_SPELLS.find((s) => s.name === r.phrase);
-        if (spell && spell.name !== this.sealedSpell) hits.push({ spell, start: i, end: i + size - 1, conf: r.confidence });
-      }
-    }
-    // Greedily take the highest-confidence, non-overlapping, distinct spells.
-    hits.sort((a, b) => b.conf - a.conf);
-    const used = new Set<number>();
-    const seen = new Set<string>();
-    const picks: { spell: Spell; start: number }[] = [];
-    for (const h of hits) {
-      let overlap = false;
-      for (let j = h.start; j <= h.end; j++) if (used.has(j)) overlap = true;
-      if (overlap || seen.has(h.spell.name)) continue;
-      for (let j = h.start; j <= h.end; j++) used.add(j);
-      seen.add(h.spell.name);
-      picks.push({ spell: h.spell, start: h.start });
-    }
-    picks.sort((a, b) => a.start - b.start);
-    return picks.map((p) => p.spell);
+    const names = detectSpellNames(this.matcher, this.spellNames, text, this.sealedSpell);
+    return names.map((n) => PLAYER_SPELLS.find((s) => s.name === n)).filter((s): s is Spell => !!s);
   }
 
   /** Spell damage after creature/Fury base and the elemental type multiplier. */
@@ -812,7 +803,7 @@ export class BattleScene extends Phaser.Scene {
     this.castThisTurn = true;
     this.turn = "idle";
     this.banner.setText("");
-    this.pendingSpell = undefined;
+    this.pendingSpells = [];
 
     const power = this.shoutPower();
     const quick = this.quickBonus();
@@ -988,7 +979,7 @@ export class BattleScene extends Phaser.Scene {
     this.turnsTaken += 1;
     this.pendingTimer?.remove();
     this.pendingTimer = undefined;
-    this.pendingSpell = undefined;
+    this.pendingSpells = [];
     this.peakLoudness = 0; // peak is per utterance / since last cast
     this.turnStartTime = this.time.now; // for Quick Cast
     this.heardLine.setText("Heard: —");
@@ -1217,7 +1208,7 @@ export class BattleScene extends Phaser.Scene {
   private showSignatureWarning(): void {
     this.warnText?.destroy();
     this.warnText = this.add
-      .text(this.scale.width / 2, 96, `⚠ ${this.enemyDef.name} will use ${this.enemyDef.signatureName} next turn!`, {
+      .text(this.scale.width / 2, 112, `⚠ ${this.enemyDef.name} will use ${this.enemyDef.signatureName} next turn!`, {
         fontFamily: "monospace",
         fontSize: "17px",
         fontStyle: "bold",
@@ -1532,7 +1523,7 @@ export class BattleScene extends Phaser.Scene {
     this.updateUltMeter();
     this.pendingTimer?.remove();
     this.pendingTimer = undefined;
-    this.pendingSpell = undefined;
+    this.pendingSpells = [];
     this.comboBonus = COMBO_BONUS;
     this.furyMult = {};
     this.rewardLayer?.destroy(true);
