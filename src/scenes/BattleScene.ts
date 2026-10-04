@@ -23,6 +23,7 @@ import {
   type Spell,
   type Creature,
   type EnemyDef,
+  type Signature,
   type Element,
 } from "@data/roster";
 
@@ -614,6 +615,7 @@ export class BattleScene extends Phaser.Scene {
     this.anim.startIdle(this.playerView);
 
     this.setActiveSpells();
+    this.clearSeal(); // switching escapes Root
     this.refreshPlayerHp(false);
     sharedSound.blip(620);
 
@@ -1162,16 +1164,21 @@ export class BattleScene extends Phaser.Scene {
     this.heardLine.setText("Heard: —");
     this.applySealVisual();
 
-    // Burn ticks at the start of each of the player's turns.
+    // Burn ticks at the start of each of the player's turns (water is immune,
+    // so switching to a water creature clears it).
     if (this.playerBurn > 0) {
-      this.playerBurn -= 1;
-      this.active().hp = Math.max(0, this.active().hp - BURN_DMG);
-      this.refreshPlayerHp(true);
-      this.anim.floatingDamage(this.playerPos.x, this.playerPos.y - 90, BURN_DMG);
-      sharedSound.impact(BURN_DMG);
-      if (this.active().hp <= 0) {
-        this.handleFaint();
-        return;
+      if (this.activeCreature().element === "water") {
+        this.playerBurn = 0;
+      } else {
+        this.playerBurn -= 1;
+        this.active().hp = Math.max(0, this.active().hp - BURN_DMG);
+        this.refreshPlayerHp(true);
+        this.anim.floatingDamage(this.playerPos.x, this.playerPos.y - 90, BURN_DMG);
+        sharedSound.impact(BURN_DMG);
+        if (this.active().hp <= 0) {
+          this.handleFaint();
+          return;
+        }
       }
     }
 
@@ -1384,10 +1391,25 @@ export class BattleScene extends Phaser.Scene {
   /* Signature moves + status effects                                       */
   /* --------------------------------------------------------------------- */
 
+  /** Short description of how to counter a signature move. */
+  private signatureCounter(sig: Signature): string {
+    switch (sig) {
+      case "burn":
+        return "GUARD blocks it; water is immune";
+      case "tide":
+        return "break it with a super-effective hit";
+      case "root":
+        return "SWITCH creatures to escape";
+      case "cataclysm":
+        return "GUARD halves it; super-effective SHOUT CRIT interrupts";
+    }
+  }
+
   private showSignatureWarning(): void {
     this.warnText?.destroy();
+    const def = this.enemyDef;
     this.warnText = this.add
-      .text(this.scale.width / 2, 112, `⚠ ${this.enemyDef.name} will use ${this.enemyDef.signatureName} next turn!`, {
+      .text(this.scale.width / 2, 112, `⚠ ${def.name} — ${def.signatureName} next turn · ${this.signatureCounter(def.signature)}`, {
         fontFamily: "monospace",
         fontSize: "17px",
         fontStyle: "bold",
@@ -1411,8 +1433,15 @@ export class BattleScene extends Phaser.Scene {
 
     switch (def.signature) {
       case "burn":
-        this.playerBurn = BURN_TURNS;
-        this.castLine.setText(`${def.name} uses Burn! (${BURN_DMG}/turn × ${BURN_TURNS})`);
+        if (this.activeCreature().element === "water") {
+          this.castLine.setText(`${def.name} used Burn — ${this.activeCreature().name} is immune!`);
+        } else if (this.playerGuard) {
+          this.playerGuard = false;
+          this.castLine.setText(`${def.name} used Burn — GUARD blocked it!`);
+        } else {
+          this.playerBurn = BURN_TURNS;
+          this.castLine.setText(`${def.name} uses Burn! (${BURN_DMG}/turn × ${BURN_TURNS})`);
+        }
         break;
       case "tide":
         this.enemyShield = true;
@@ -1478,11 +1507,15 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
-  /** Tide Shield: returns true if this hit is blocked (consumes the shield). */
+  /** Tide Shield: only a super-effective hit breaks it. Non-super hits are
+   *  blocked and the shield stays up. Returns true if the hit was blocked. */
   private shieldBlocks(superEffective: boolean): boolean {
     if (!this.enemyShield) return false;
-    this.enemyShield = false;
-    return !superEffective;
+    if (superEffective) {
+      this.enemyShield = false; // broken; the hit goes through
+      return false;
+    }
+    return true; // blocked; shield remains
   }
 
   private showBlocked(): void {
