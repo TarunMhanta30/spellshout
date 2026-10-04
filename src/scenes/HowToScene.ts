@@ -32,6 +32,20 @@ export class HowToScene extends Phaser.Scene {
       .text(width / 2, 44, "HOW TO PLAY", { fontFamily: "monospace", fontSize: "34px", fontStyle: "bold", color: "#e9e4ff" })
       .setOrigin(0.5);
 
+    // In Wispr Flow mode, remind the player how to trigger it.
+    if (inputRouter.getMode() === "wispr") {
+      this.add
+        .text(width / 2, 84, "Hold your Wispr Flow hotkey (Ctrl + Win on Windows) and speak.", {
+          fontFamily: "monospace",
+          fontSize: "15px",
+          fontStyle: "bold",
+          color: "#14121f",
+          backgroundColor: "#7c6cff",
+          padding: { x: 10, y: 5 },
+        })
+        .setOrigin(0.5);
+    }
+
     const cards: [string, string, number][] = [
       ["SHOUT", "Say spell names to cast.\nThe LOUDER you shout, the\nstronger the spell — a full\nshout is a SHOUT CRIT.", 0xffd36b],
       ["ELEMENTS", "Fire > Nature > Water > Fire.\nSuper-effective = ×2,\nresisted = ×0.5.\nShadow is neutral.", 0x58e39b],
