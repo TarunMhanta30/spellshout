@@ -283,6 +283,8 @@ export class BattleScene extends Phaser.Scene {
     this.playerBar = this.createHpBar(50, 48, 340, this.activeCreature().name, "left");
     this.enemyBar = this.createHpBar(width - 50 - 340, 48, 340, "", "right");
     this.updatePlayerHpBar(false);
+    // The card layer must exist before setActiveSpells() → createSpellCards() uses it.
+    this.cardLayer = this.add.container(0, 0);
     this.setActiveSpells();
     this.createPortraits();
 
@@ -375,9 +377,6 @@ export class BattleScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(60)
       .setAlpha(0);
-
-    this.cardLayer = this.add.container(0, 0);
-    this.createSpellCards();
 
     // Debug panel: only when the URL carries ?debug (e.g. localhost:5173/?debug).
     this.debugEnabled = new URLSearchParams(window.location.search).has("debug");
@@ -509,6 +508,7 @@ export class BattleScene extends Phaser.Scene {
 
   /** Two large cards for the active creature's own spells. */
   private createSpellCards(): void {
+    if (!this.cardLayer) return;
     this.cardLayer.removeAll(true);
     this.cards.clear();
     const { width } = this.scale;
