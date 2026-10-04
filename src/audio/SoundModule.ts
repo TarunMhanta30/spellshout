@@ -79,24 +79,279 @@ export class SoundModule {
     return g;
   }
 
-  /** Airy whoosh, pitched per element. */
+  /** The attack sound, with a distinct, punchy character per element:
+   *   - fire: a crackling roar with a low boom
+   *   - water: a splashing sweep with bubbly blips
+   *   - nature: a whip crack with a rustle
+   *   - shadow / void: a deep whoosh with a reverse swell
+   */
   whoosh(element: SfxElement): void {
+    switch (element) {
+      case "fire":
+        this.fireRoar();
+        break;
+      case "water":
+        this.waterSplash();
+        break;
+      case "nature":
+        this.natureWhip();
+        break;
+      case "shadow":
+        this.shadowWhoosh(false);
+        break;
+      case "void":
+      default:
+        this.shadowWhoosh(true);
+        break;
+    }
+  }
+
+  /** Fire: a filtered-noise roar with crackle pops over a low boom. */
+  private fireRoar(): void {
     const ctx = this.ensure();
-    const dur = 0.32;
-    const base =
-      element === "fire" ? 1700 : element === "water" ? 650 : element === "nature" ? 1050 : 900;
+    const t = ctx.currentTime;
+    const dur = 0.42;
+
     const src = this.noise(ctx, dur);
     const bp = ctx.createBiquadFilter();
     bp.type = "bandpass";
-    bp.Q.value = 0.9;
-    const t = ctx.currentTime;
-    bp.frequency.setValueAtTime(base * 0.55, t);
-    bp.frequency.exponentialRampToValueAtTime(base * 1.7, t + dur);
-    const g = this.env(ctx, 0.22, dur, 0.05);
+    bp.Q.value = 0.8;
+    bp.frequency.setValueAtTime(300, t);
+    bp.frequency.linearRampToValueAtTime(1400, t + dur * 0.4);
+    bp.frequency.exponentialRampToValueAtTime(220, t + dur);
+    const g = this.env(ctx, 0.3, dur, 0.02);
     src.connect(bp).connect(g).connect(this.master!);
     src.start();
     src.stop(t + dur);
+
+    const boom = ctx.createOscillator();
+    boom.type = "sine";
+    boom.frequency.setValueAtTime(90, t);
+    boom.frequency.exponentialRampToValueAtTime(42, t + 0.3);
+    const bg = this.env(ctx, 0.5, 0.34, 0.005);
+    boom.connect(bg).connect(this.master!);
+    boom.start();
+    boom.stop(t + 0.34);
+
+    for (let i = 0; i < 6; i++) {
+      const ct = t + 0.03 + Math.random() * dur * 0.8;
+      const cn = this.noise(ctx, 0.04);
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 2000;
+      const cg = ctx.createGain();
+      cg.gain.setValueAtTime(0.0001, ct);
+      cg.gain.exponentialRampToValueAtTime(0.12, ct + 0.004);
+      cg.gain.exponentialRampToValueAtTime(0.0001, ct + 0.03);
+      cn.connect(hp).connect(cg).connect(this.master!);
+      cn.start(ct);
+      cn.stop(ct + 0.04);
+    }
     this.markActive(dur);
+  }
+
+  /** Water: a downward lowpass sweep (splash) with rising sine blips (bubbles). */
+  private waterSplash(): void {
+    const ctx = this.ensure();
+    const t = ctx.currentTime;
+    const dur = 0.4;
+
+    const src = this.noise(ctx, dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(3200, t);
+    lp.frequency.exponentialRampToValueAtTime(500, t + dur);
+    const g = this.env(ctx, 0.26, dur, 0.01);
+    src.connect(lp).connect(g).connect(this.master!);
+    src.start();
+    src.stop(t + dur);
+
+    for (let i = 0; i < 5; i++) {
+      const bt = t + 0.05 + i * 0.06;
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      const f = 500 + i * 160 + Math.random() * 80;
+      o.frequency.setValueAtTime(f * 0.8, bt);
+      o.frequency.exponentialRampToValueAtTime(f * 1.6, bt + 0.05);
+      const bg = ctx.createGain();
+      bg.gain.setValueAtTime(0.0001, bt);
+      bg.gain.exponentialRampToValueAtTime(0.1, bt + 0.01);
+      bg.gain.exponentialRampToValueAtTime(0.0001, bt + 0.06);
+      o.connect(bg).connect(this.master!);
+      o.start(bt);
+      o.stop(bt + 0.07);
+    }
+    this.markActive(dur);
+  }
+
+  /** Nature: a short bright whip crack over a soft sustained rustle. */
+  private natureWhip(): void {
+    const ctx = this.ensure();
+    const t = ctx.currentTime;
+
+    const crackDur = 0.09;
+    const cn = this.noise(ctx, crackDur);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(900, t);
+    bp.frequency.exponentialRampToValueAtTime(4200, t + crackDur);
+    const cg = this.env(ctx, 0.3, crackDur, 0.002);
+    cn.connect(bp).connect(cg).connect(this.master!);
+    cn.start();
+    cn.stop(t + crackDur);
+
+    const rDur = 0.4;
+    const rn = this.noise(ctx, rDur);
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 1800;
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 5200;
+    const rg = ctx.createGain();
+    rg.gain.setValueAtTime(0.0001, t);
+    rg.gain.exponentialRampToValueAtTime(0.09, t + 0.08);
+    rg.gain.exponentialRampToValueAtTime(0.0001, t + rDur);
+    rn.connect(hp).connect(lp).connect(rg).connect(this.master!);
+    rn.start();
+    rn.stop(t + rDur);
+    this.markActive(rDur);
+  }
+
+  /** Shadow/void: a deep whoosh whose gain swells in then cuts, over a sub tone.
+   *  `deeper` (void) drops it an extra bit lower. */
+  private shadowWhoosh(deeper: boolean): void {
+    const ctx = this.ensure();
+    const t = ctx.currentTime;
+    const dur = 0.5;
+
+    const src = this.noise(ctx, dur);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = 0.7;
+    bp.frequency.setValueAtTime(deeper ? 240 : 360, t);
+    bp.frequency.linearRampToValueAtTime(deeper ? 520 : 760, t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.28, t + dur * 0.85); // reverse swell in
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur); // then cut
+    src.connect(bp).connect(g).connect(this.master!);
+    src.start();
+    src.stop(t + dur);
+
+    const o = ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.setValueAtTime(deeper ? 50 : 70, t);
+    o.frequency.exponentialRampToValueAtTime(deeper ? 34 : 46, t + dur);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.linearRampToValueAtTime(0.4, t + dur * 0.8);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(og).connect(this.master!);
+    o.start();
+    o.stop(t + dur);
+    this.markActive(dur);
+  }
+
+  /** Heavy layered boom laid under a mega attack. */
+  megaBoom(): void {
+    const ctx = this.ensure();
+    const t = ctx.currentTime;
+    const dur = 0.7;
+    for (const [f0, f1, vol] of [
+      [120, 38, 0.5],
+      [80, 30, 0.45],
+      [180, 60, 0.3],
+    ] as const) {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      const g = this.env(ctx, vol, dur, 0.004);
+      o.connect(g).connect(this.master!);
+      o.start();
+      o.stop(t + dur);
+    }
+    const n = this.noise(ctx, 0.12);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 800;
+    const ng = this.env(ctx, 0.4, 0.12, 0.002);
+    n.connect(lp).connect(ng).connect(this.master!);
+    n.start();
+    n.stop(t + 0.12);
+    this.markActive(dur);
+  }
+
+  /** Rising bell chime for a heal. */
+  heal(): void {
+    const ctx = this.ensure();
+    const t0 = ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((f, i) => {
+      const t = t0 + i * 0.09;
+      for (const [mul, vol] of [
+        [1, 0.14],
+        [2, 0.05],
+      ] as const) {
+        const o = ctx.createOscillator();
+        o.type = "sine";
+        o.frequency.setValueAtTime(f * mul, t);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+        o.connect(g).connect(this.master!);
+        o.start(t);
+        o.stop(t + 0.55);
+      }
+    });
+    this.markActive(notes.length * 0.09 + 0.5);
+  }
+
+  /** Short, bright burst when an enemy is defeated. */
+  winBurst(): void {
+    this.arpeggio([784, 1047, 1319], 0.08, 0.16, "triangle");
+  }
+
+  /** Full triumphant fanfare for the final victory. */
+  fanfare(): void {
+    const ctx = this.ensure();
+    const t0 = ctx.currentTime;
+    const melody = [523.25, 659.25, 783.99, 1046.5, 1318.5];
+    melody.forEach((f, i) => {
+      const t = t0 + i * 0.14;
+      for (const [type, vol] of [
+        ["sawtooth", 0.1],
+        ["square", 0.05],
+      ] as const) {
+        const o = ctx.createOscillator();
+        o.type = type;
+        o.frequency.setValueAtTime(f, t);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+        o.connect(g).connect(this.master!);
+        o.start(t);
+        o.stop(t + 0.45);
+      }
+    });
+    const ct = t0 + melody.length * 0.14;
+    for (const f of [523.25, 659.25, 783.99, 1046.5]) {
+      const o = ctx.createOscillator();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(f, ct);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, ct);
+      g.gain.exponentialRampToValueAtTime(0.12, ct + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.0001, ct + 0.9);
+      o.connect(g).connect(this.master!);
+      o.start(ct);
+      o.stop(ct + 1.0);
+    }
+    this.markActive(melody.length * 0.14 + 1.0);
   }
 
   /** Impact thud + crack; heavier (lower, louder, longer) with damage. */

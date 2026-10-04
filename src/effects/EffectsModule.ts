@@ -311,4 +311,106 @@ export class EffectsModule {
     cam.zoomTo(1.06, 90, "Quad.easeOut");
     this.scene.time.delayedCall(110, () => cam.zoomTo(1, 220, "Quad.easeOut"));
   }
+
+  /* --------------------------- celebration -------------------------- */
+
+  /** Green sparkles rising off a healing creature. */
+  healSparkles(x: number, y: number): void {
+    const e = this.scene.add
+      .particles(x, y, "fx-dot", {
+        tint: [0x58e39b, 0x9be36b, 0xffffff],
+        speed: { min: 20, max: 90 },
+        angle: { min: 235, max: 305 }, // upward spread
+        gravityY: -40,
+        lifespan: 850,
+        scale: { start: 0.9, end: 0 },
+        quantity: 3,
+        frequency: 35,
+        blendMode: Phaser.BlendModes.ADD,
+      })
+      .setDepth(60);
+    this.scene.time.delayedCall(650, () => e.stop());
+    this.scene.time.delayedCall(1700, () => e.destroy());
+  }
+
+  /** The boss shattering into particles: a bright burst, flung shards, and a
+   *  shock ring, all in the given colour. */
+  shatter(x: number, y: number, color: number): void {
+    const burst = this.scene.add
+      .particles(x, y, "fx-dot", {
+        tint: [color, 0xffffff, 0xb79cff],
+        speed: { min: 120, max: 420 },
+        angle: { min: 0, max: 360 },
+        lifespan: { min: 500, max: 1100 },
+        scale: { start: 1.6, end: 0 },
+        gravityY: 260,
+        blendMode: Phaser.BlendModes.ADD,
+        emitting: false,
+      })
+      .setDepth(80);
+    burst.explode(60, x, y);
+
+    const shards = this.scene.add
+      .particles(x, y, "fx-leaf", {
+        tint: [color, 0xffffff],
+        speed: { min: 80, max: 320 },
+        angle: { min: 0, max: 360 },
+        rotate: { min: 0, max: 360 },
+        lifespan: { min: 600, max: 1200 },
+        scale: { start: 1.6, end: 0.2 },
+        gravityY: 420,
+        emitting: false,
+      })
+      .setDepth(80);
+    shards.explode(36, x, y);
+
+    const ring = this.scene.add
+      .image(x, y, "fx-soft")
+      .setTint(color)
+      .setScale(0.6)
+      .setDepth(79)
+      .setBlendMode(Phaser.BlendModes.ADD);
+    this.scene.tweens.add({
+      targets: ring,
+      scale: 6,
+      alpha: 0,
+      duration: 500,
+      ease: "Quad.easeOut",
+      onComplete: () => ring.destroy(),
+    });
+
+    this.scene.time.delayedCall(1500, () => {
+      burst.destroy();
+      shards.destroy();
+    });
+  }
+
+  /** Element-coloured confetti raining down across the screen. */
+  confetti(width: number): void {
+    const colors = [
+      ELEMENT_COLOR.fire,
+      ELEMENT_COLOR.water,
+      ELEMENT_COLOR.nature,
+      ELEMENT_COLOR.shadow,
+      0xffd36b,
+    ];
+    const e = this.scene.add
+      .particles(0, -20, "fx-leaf", {
+        x: { min: 0, max: width },
+        y: -20,
+        tint: colors,
+        speedY: { min: 120, max: 300 },
+        speedX: { min: -60, max: 60 },
+        angle: { min: 0, max: 360 },
+        rotate: { min: 0, max: 360 },
+        lifespan: 3000,
+        scale: { start: 1.2, end: 0.8 },
+        gravityY: 120,
+        frequency: 28,
+        quantity: 4,
+      })
+      .setDepth(99);
+    this.scene.time.delayedCall(2200, () => e.stop());
+    this.scene.time.delayedCall(5600, () => e.destroy());
+  }
 }

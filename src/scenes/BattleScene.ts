@@ -1182,8 +1182,7 @@ export class BattleScene extends Phaser.Scene {
               this.anim.hit(this.enemyView, dmg, {
                 resumeIdle: false,
                 onComplete: () => {
-                  this.anim.setSlowMo(1);
-                  this.anim.defeat(this.enemyView, this.playerView, () => this.onEnemyDefeated());
+                  this.resolveEnemyDefeat();
                 },
               });
               return;
@@ -1258,8 +1257,7 @@ export class BattleScene extends Phaser.Scene {
               this.anim.hit(this.enemyView, dmg, {
                 resumeIdle: false,
                 onComplete: () => {
-                  this.anim.setSlowMo(1);
-                  this.anim.defeat(this.enemyView, this.playerView, () => this.onEnemyDefeated());
+                  this.resolveEnemyDefeat();
                 },
               });
               return;
@@ -1386,7 +1384,10 @@ export class BattleScene extends Phaser.Scene {
     this.anim.attack(this.playerView, () => {
       if (lethal) this.anim.setSlowMo(0.4); // the killing blow lands in slow motion
       sharedSound.whoosh(spell.element);
-      if (isMega) this.effects.screenFlash(255, 236, 150);
+      if (isMega) {
+        sharedSound.megaBoom();
+        this.effects.screenFlash(255, 236, 150);
+      }
       if (power.crit) {
         sharedSound.crit();
         this.effects.screenFlash(255, 200, 255);
@@ -1416,8 +1417,7 @@ export class BattleScene extends Phaser.Scene {
           this.anim.hit(this.enemyView, dmg, {
             resumeIdle: false,
             onComplete: () => {
-              this.anim.setSlowMo(1);
-              this.anim.defeat(this.enemyView, this.playerView, () => this.onEnemyDefeated());
+              this.resolveEnemyDefeat();
             },
           });
           return;
@@ -1437,7 +1437,8 @@ export class BattleScene extends Phaser.Scene {
     this.refreshPlayerHp(true);
     this.castLine.setText(`${this.activeCreature().name} heals +${amount}`);
 
-    sharedSound.blip(880);
+    sharedSound.heal();
+    this.effects.healSparkles(this.playerPos.x, this.playerPos.y - 50);
     // A rising green "+N" over the creature.
     const label = this.add
       .text(this.playerPos.x, this.playerPos.y - 95, `+${amount}`, {
@@ -1455,11 +1456,81 @@ export class BattleScene extends Phaser.Scene {
     this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
   }
 
-  /** Boss down → victory; otherwise offer a reward, then the next challenger. */
+  /** Resolve the enemy's death: the boss shatters into particles; a mid topples
+   *  and greys out (and the player celebrates). Both end in onEnemyDefeated. */
+  private resolveEnemyDefeat(): void {
+    this.anim.setSlowMo(1);
+    if (this.enemyDef.isBoss) {
+      this.effects.screenFlash(255, 255, 255);
+      this.effects.shatter(this.enemyPos.x, this.enemyPos.y - CREATURE_H * 0.4, ELEMENT_COLOR.void);
+      this.anim.stopIdle(this.enemyView);
+      this.enemyShape.setVisible(false);
+      this.enemyShadow?.setVisible(false);
+      this.bossAura?.setVisible(false);
+      this.time.delayedCall(360, () => this.onEnemyDefeated());
+    } else {
+      this.anim.defeat(this.enemyView, this.playerView, () => this.onEnemyDefeated());
+    }
+  }
+
+  /** Boss down → the victory sequence; otherwise a win burst then a reward. */
   private onEnemyDefeated(): void {
     this.progressCrosses[this.enemyIndex]?.setVisible(true);
-    if (this.enemyDef.isBoss) this.showResult(true);
-    else this.showRewards();
+    if (this.enemyDef.isBoss) {
+      this.playVictorySequence();
+    } else {
+      sharedSound.winBurst();
+      this.showRewards();
+    }
+  }
+
+  /** The full victory cinematic after Voidcrown falls: screen flash + fanfare,
+   *  element-coloured confetti, the party jumping, then the result with its
+   *  score counting up. (The slow-mo blow and boss shatter already played.) */
+  private playVictorySequence(): void {
+    this.turn = "result"; // ignore all voice until the result screen binds rematch
+    this.setCardsEnabled(false);
+    this.banner.setText("");
+    this.clearStatusLines();
+
+    sharedSound.fanfare();
+    this.effects.screenFlash(255, 255, 255);
+    this.effects.confetti(this.scale.width);
+    this.jumpParty();
+
+    this.time.delayedCall(1600, () => this.showResult(true, true));
+  }
+
+  /** The surviving party creatures line the foreground and jump for joy. */
+  private jumpParty(): void {
+    const { width, height } = this.scale;
+    const alive = this.party.filter((m) => !m.fainted);
+    const n = alive.length;
+    alive.forEach((m, i) => {
+      const x = width / 2 + (i - (n - 1) / 2) * 150;
+      const { image, shadow } = placeCreature(this, {
+        key: m.creature.textureKey,
+        x,
+        side: "player",
+        groundY: height - 18,
+        height: 128,
+      });
+      image.setDepth(101);
+      shadow.setDepth(100);
+      const baseY = image.y;
+      this.tweens.add({
+        targets: image,
+        y: baseY - 64,
+        duration: 320,
+        ease: "Quad.easeOut",
+        yoyo: true,
+        repeat: 6,
+        delay: i * 90,
+        onComplete: () => {
+          image.y = baseY;
+        },
+      });
+    });
   }
 
   /* --------------------------------------------------------------------- */
@@ -1469,7 +1540,6 @@ export class BattleScene extends Phaser.Scene {
   private showRewards(): void {
     this.turn = "reward";
     this.banner.setText("");
-    sharedSound.victory();
 
     const furyElement = Phaser.Utils.Array.GetRandom(["fire", "water", "nature"]) as Element;
     const all = [
@@ -1879,13 +1949,16 @@ export class BattleScene extends Phaser.Scene {
   /* Result screen + voice rematch                                          */
   /* --------------------------------------------------------------------- */
 
-  private showResult(won: boolean): void {
+  private showResult(won: boolean, cinematic = false): void {
     // Keep the mic running so "rematch" can be heard — do NOT stop the voice.
     this.turn = "result";
     this.banner.setText("");
     this.heardLine.setText("Heard: —");
-    if (won) sharedSound.victory();
-    else sharedSound.defeat();
+    // The cinematic path already played the fanfare; don't double up.
+    if (!cinematic) {
+      if (won) sharedSound.victory();
+      else sharedSound.defeat();
+    }
 
     const { width, height } = this.scale;
     const cx = width / 2;
@@ -1925,7 +1998,29 @@ export class BattleScene extends Phaser.Scene {
     lines.push(text(h / 2 - 132, won ? "VICTORY" : "DEFEAT", 72, won ? "#58e39b" : "#ff6b4a", true));
     lines.push(text(h / 2 - 76, subtitle, 22, "#e9e4ff"));
     lines.push(text(h / 2 - 48, `Creatures standing: ${standing} / ${this.party.length}`, 16, "#9a92c7"));
-    lines.push(text(h / 2 - 18, `Score: ${score}${newBest ? "    ★ NEW BEST" : `    (best ${best})`}`, 22, newBest ? "#ffd36b" : "#e9e4ff", newBest));
+
+    // Score line — counts up digit by digit on the victory cinematic, then
+    // reveals a NEW BEST burst if the run set a record.
+    const suffix = newBest ? "    ★ NEW BEST" : `    (best ${best})`;
+    const scoreText = text(h / 2 - 18, "", 22, newBest ? "#ffd36b" : "#e9e4ff", newBest);
+    if (cinematic) {
+      scoreText.setText("Score: 0");
+      const counter = { v: 0 };
+      this.tweens.add({
+        targets: counter,
+        v: score,
+        duration: 1100,
+        ease: "Cubic.easeOut",
+        onUpdate: () => scoreText.setText(`Score: ${Math.round(counter.v)}`),
+        onComplete: () => {
+          scoreText.setText(`Score: ${score}${suffix}`);
+          if (newBest) this.showNewBestBurst(cx, h / 2 - 18);
+        },
+      });
+    } else {
+      scoreText.setText(`Score: ${score}${suffix}`);
+    }
+    lines.push(scoreText);
 
     let y = h / 2 + 12;
     if (inputRouter.getMode() === "wispr") {
@@ -1957,6 +2052,46 @@ export class BattleScene extends Phaser.Scene {
       yoyo: true,
       repeat: -1,
     });
+  }
+
+  /** A celebratory pop over the score when the run sets a new best. */
+  private showNewBestBurst(x: number, y: number): void {
+    sharedSound.winBurst();
+    const label = this.add
+      .text(x, y - 42, "★ NEW BEST ★", {
+        fontFamily: "monospace",
+        fontSize: "30px",
+        fontStyle: "bold",
+        color: "#ffd36b",
+        stroke: "#14121f",
+        strokeThickness: 5,
+      })
+      .setOrigin(0.5)
+      .setDepth(102)
+      .setScale(0.3);
+    this.tweens.add({ targets: label, scale: 1, duration: 260, ease: "Back.easeOut" });
+    this.tweens.add({
+      targets: label,
+      alpha: { from: 1, to: 0.6 },
+      duration: 600,
+      yoyo: true,
+      repeat: -1,
+    });
+
+    const burst = this.add
+      .particles(x, y - 42, "fx-dot", {
+        tint: [0xffd36b, 0xffffff],
+        speed: { min: 80, max: 260 },
+        angle: { min: 0, max: 360 },
+        lifespan: 700,
+        scale: { start: 1.2, end: 0 },
+        gravityY: 200,
+        blendMode: Phaser.BlendModes.ADD,
+        emitting: false,
+      })
+      .setDepth(102);
+    burst.explode(30, x, y - 42);
+    this.time.delayedCall(900, () => burst.destroy());
   }
 
   private rematch(): void {
