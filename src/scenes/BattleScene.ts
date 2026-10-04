@@ -20,6 +20,9 @@ import {
   BOSS,
   ENEMY_ATTACKS,
   SHIFT_ELEMENTS,
+  MEGA_UNLOCK_AT,
+  HEAL_UNLOCK_AT,
+  HEAL_FRACTION_OF_MAX,
   typeMultiplier,
   type Spell,
   type Creature,
@@ -68,6 +71,10 @@ interface PartyMember {
   hp: number;
   maxHp: number;
   fainted: boolean;
+  /** Normal attacks this creature has landed toward unlocking its mega / heal.
+   *  Each resets to 0 when its own spell is cast ("locks again after use"). */
+  megaUsed: number;
+  healUsed: number;
 }
 
 /** Shout Power gauge geometry (vertical bar beside the player). */
@@ -164,8 +171,12 @@ export class BattleScene extends Phaser.Scene {
   private comboBonus = COMBO_BONUS;
   private furyMult: Partial<Record<Element, number>> = {};
 
-  // UI refs.
-  private readonly cards = new Map<string, { bg: Phaser.GameObjects.Rectangle; chain: Phaser.GameObjects.Text }>();
+  // UI refs. Each card is a container so it can be dimmed independently (locked
+  // mega/heal, or a spell sealed by Root).
+  private readonly cards = new Map<
+    string,
+    { card: Phaser.GameObjects.Container; chain: Phaser.GameObjects.Text; locked: boolean }
+  >();
   private progressLayer?: Phaser.GameObjects.Container;
   private progressCrosses: Phaser.GameObjects.Text[] = [];
   private rewardLayer?: Phaser.GameObjects.Container;
@@ -261,7 +272,14 @@ export class BattleScene extends Phaser.Scene {
     this.anim = new AnimationsModule(this);
 
     // Build the party; the chosen creature starts active, the rest wait.
-    this.party = CREATURES.map((c) => ({ creature: c, hp: CREATURE_MAX_HP, maxHp: CREATURE_MAX_HP, fainted: false }));
+    this.party = CREATURES.map((c) => ({
+      creature: c,
+      hp: CREATURE_MAX_HP,
+      maxHp: CREATURE_MAX_HP,
+      fainted: false,
+      megaUsed: 0,
+      healUsed: 0,
+    }));
     this.activeIndex = Math.max(0, CREATURES.findIndex((c) => c.name === this.startCreature.name));
 
     this.playerBaseX = 235;
@@ -506,47 +524,89 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
-  /** Two large cards for the active creature's own spells. */
+  /** All six of the active creature's spells as cards that fit the screen in one
+   *  row (four normals, then mega and heal). Locked mega/heal cards are dimmed
+   *  and show "unlocks in N". */
   private createSpellCards(): void {
     if (!this.cardLayer) return;
     this.cardLayer.removeAll(true);
     this.cards.clear();
     const { width } = this.scale;
     const spells = this.activeCreature().spells;
-    const cardW = 250;
-    const cardH = 92;
-    const gap = 26;
+    const cardW = 148;
+    const cardH = 86;
+    const gap = 8;
     const totalW = spells.length * cardW + (spells.length - 1) * gap;
     const startX = width / 2 - totalW / 2;
-    const cy = 446; // kept above the bottom Wispr bar
+    const cy = 474; // below the heard/cast panel, above the bottom edge
 
     spells.forEach((spell, i) => {
       const cx = startX + i * (cardW + gap) + cardW / 2;
       const boosted = this.isBoosted(spell);
-      const dmg = this.effectiveDamage(spell);
+      const locked = this.spellLocked(spell);
+      const accent = spell.kind === "mega" ? 0xffd36b : spell.kind === "heal" ? 0x58e39b : ELEMENT_COLOR[spell.element];
 
       const bg = this.add
-        .rectangle(cx, cy, cardW, cardH, 0x1e1b2e)
-        .setStrokeStyle(boosted ? 3 : 2, boosted ? ELEMENT_COLOR[spell.element] : 0x3a3550);
-      const dot = this.add.circle(cx - cardW / 2 + 18, cy - cardH / 2 + 16, 7, ELEMENT_COLOR[spell.element]);
+        .rectangle(0, 0, cardW, cardH, 0x1e1b2e)
+        .setStrokeStyle(boosted || spell.kind !== "normal" ? 3 : 2, boosted ? ELEMENT_COLOR[spell.element] : accent);
+      const dot = this.add.circle(-cardW / 2 + 14, -cardH / 2 + 14, 6, ELEMENT_COLOR[spell.element]);
+      const tag =
+        spell.kind === "mega" ? "MEGA" : spell.kind === "heal" ? "HEAL" : boosted ? "+25%" : "";
+      const tagText = this.add
+        .text(cardW / 2 - 8, -cardH / 2 + 10, tag, {
+          fontFamily: "monospace",
+          fontSize: "10px",
+          fontStyle: "bold",
+          color: spell.kind === "mega" ? "#ffd36b" : spell.kind === "heal" ? "#58e39b" : "#ffd36b",
+        })
+        .setOrigin(1, 0.5);
       const name = this.add
-        .text(cx, cy - 12, spell.name, { fontFamily: "monospace", fontSize: "24px", fontStyle: "bold", color: "#e9e4ff" })
+        .text(0, -6, spell.name, {
+          fontFamily: "monospace",
+          fontSize: "15px",
+          fontStyle: "bold",
+          color: "#e9e4ff",
+          align: "center",
+          wordWrap: { width: cardW - 16 },
+        })
         .setOrigin(0.5);
       const meta = this.add
-        .text(cx, cy + cardH / 2 - 15, boosted ? `${dmg} dmg +25%` : `${dmg} dmg`, {
+        .text(0, cardH / 2 - 14, this.cardMeta(spell), {
           fontFamily: "monospace",
-          fontSize: "13px",
+          fontSize: "12px",
           color: boosted ? "#ffd36b" : "#9a92c7",
         })
         .setOrigin(0.5);
+      // "unlocks in N" line for a locked mega/heal (hidden otherwise).
+      const lockText = this.add
+        .text(0, cardH / 2 - 14, `unlocks in ${this.unlockRemaining(spell)}`, {
+          fontFamily: "monospace",
+          fontSize: "12px",
+          fontStyle: "bold",
+          color: "#ff9e6b",
+        })
+        .setOrigin(0.5)
+        .setVisible(locked);
+      meta.setVisible(!locked);
       // Chain overlay shown when sealed by Blightroot's Root.
       const chain = this.add
-        .text(cx, cy, "⛓", { fontFamily: "monospace", fontSize: "44px", color: "#ffffff" })
+        .text(0, 0, "⛓", { fontFamily: "monospace", fontSize: "34px", color: "#ffffff" })
         .setOrigin(0.5)
         .setVisible(false);
-      this.cardLayer.add([bg, dot, name, meta, chain]);
-      this.cards.set(spell.name, { bg, chain });
+
+      const card = this.add.container(cx, cy, [bg, dot, tagText, name, meta, lockText, chain]);
+      this.cardLayer.add(card);
+      this.cards.set(spell.name, { card, chain, locked });
     });
+    this.updateCardStates();
+  }
+
+  /** Card footer text: heal fraction, mega flat damage, or normal damage. */
+  private cardMeta(spell: Spell): string {
+    if (spell.kind === "heal") return `heal ${Math.round(HEAL_FRACTION_OF_MAX * 100)}%`;
+    if (spell.kind === "mega") return `${spell.damage} dmg`;
+    const dmg = this.effectiveDamage(spell);
+    return this.isBoosted(spell) ? `${dmg} dmg +25%` : `${dmg} dmg`;
   }
 
   /** Four icons at the top for the gauntlet; beaten enemies get crossed out. */
@@ -726,10 +786,35 @@ export class BattleScene extends Phaser.Scene {
     return idx;
   }
 
-  /** Whether this spell gets the active creature's +25% bonus. Shadow is
-   *  neutral, so no creature ever boosts (or is boosted on) shadow. */
+  /** Whether this spell gets the active creature's +25% bonus. Only normal
+   *  attacks are boosted; shadow is neutral, so Ghost never boosts. */
   private isBoosted(spell: Spell): boolean {
-    return spell.element === this.activeCreature().element && this.activeCreature().element !== "shadow";
+    return (
+      spell.kind === "normal" &&
+      spell.element === this.activeCreature().element &&
+      this.activeCreature().element !== "shadow"
+    );
+  }
+
+  /** Normal attacks are always castable; mega/heal only once unlocked. */
+  private spellLocked(spell: Spell): boolean {
+    if (spell.kind === "mega") return this.active().megaUsed < MEGA_UNLOCK_AT;
+    if (spell.kind === "heal") return this.active().healUsed < HEAL_UNLOCK_AT;
+    return false;
+  }
+
+  /** Normal attacks still needed before a locked mega/heal unlocks. */
+  private unlockRemaining(spell: Spell): number {
+    if (spell.kind === "mega") return Math.max(0, MEGA_UNLOCK_AT - this.active().megaUsed);
+    if (spell.kind === "heal") return Math.max(0, HEAL_UNLOCK_AT - this.active().healUsed);
+    return 0;
+  }
+
+  /** Count normal attacks toward both unlock meters (combo counts as two). */
+  private registerNormalUse(n: number): void {
+    const m = this.active();
+    m.megaUsed = Math.min(MEGA_UNLOCK_AT, m.megaUsed + n);
+    m.healUsed = Math.min(HEAL_UNLOCK_AT, m.healUsed + n);
   }
 
   /** Spell damage after the chosen creature's same-element +25% bonus (cards). */
@@ -981,10 +1066,27 @@ export class BattleScene extends Phaser.Scene {
     // cast twice and a stale transcript can't re-trigger.
     if (this.castThisTurn || !canCast || !text) return;
 
-    // Accumulate distinct spells heard this window (so two names arriving in
-    // separate Chrome interim segments still form a combo).
-    for (const s of this.detectSpells(text)) {
-      if (!this.pendingSpells.some((p) => p.name === s.name)) this.pendingSpells.push(s);
+    const detected = this.detectSpells(text);
+    if (detected.length === 0) return;
+
+    // Mega and heal never combo: if one is heard and unlocked, cast it at once.
+    // (A locked one is ignored — its card shows "unlocks in N".)
+    const mega = detected.find((s) => s.kind === "mega");
+    if (mega && !this.spellLocked(mega)) {
+      this.playerCast(mega);
+      return;
+    }
+    const heal = detected.find((s) => s.kind === "heal");
+    if (heal && !this.spellLocked(heal)) {
+      this.playerCast(heal);
+      return;
+    }
+
+    // Accumulate distinct normal attacks heard this window (so two names arriving
+    // in separate Chrome interim segments still form a combo). Combos only ever
+    // chain normal attacks.
+    for (const s of detected) {
+      if (s.kind === "normal" && !this.pendingSpells.some((p) => p.name === s.name)) this.pendingSpells.push(s);
     }
     if (this.pendingSpells.length === 0) return;
 
@@ -1021,13 +1123,15 @@ export class BattleScene extends Phaser.Scene {
     return Math.max(1, Math.round(this.spellBase(spell) * typeMultiplier(spell.element, this.enemyElement())));
   }
 
-  /** Cast two spells at once: combined damage × COMBO_BONUS, with a banner. */
+  /** Cast two normal attacks at once: combined damage × COMBO_BONUS, with a
+   *  banner. Both count toward the mega / heal unlocks. */
   private comboCast(a: Spell, b: Spell): void {
     this.castThisTurn = true;
     this.countCast();
     this.turn = "idle";
     this.banner.setText("");
     this.pendingSpells = [];
+    this.registerNormalUse(2);
 
     const power = this.shoutPower();
     const quick = this.quickBonus();
@@ -1210,7 +1314,9 @@ export class BattleScene extends Phaser.Scene {
     this.peakLoudness = 0; // peak is per utterance / since last cast
     this.turnStartTime = this.time.now; // for Quick Cast
     this.heardLine.setText("Heard: —");
-    this.applySealVisual();
+    // Rebuild the cards so lock state and "unlocks in N" reflect this creature's
+    // current counters, then apply seal/lock dimming.
+    this.createSpellCards();
 
     // Burn ticks at the start of each of the player's turns (water is immune,
     // so switching to a water creature clears it).
@@ -1245,19 +1351,30 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
-  /** A player cast only ever damages the enemy. */
+  /** A player cast: a heal mends the active creature; everything else damages
+   *  the enemy. A mega resets this creature's mega meter; a landed normal
+   *  attack advances both meters toward their unlocks. */
   private playerCast(spell: Spell): void {
     this.castThisTurn = true;
     this.countCast();
     this.turn = "idle";
     this.banner.setText("");
 
+    if (spell.kind === "heal") {
+      this.castHeal();
+      return;
+    }
+
+    const isMega = spell.kind === "mega";
+    if (isMega) this.active().megaUsed = 0; // locks again after use
+    else this.registerNormalUse(1);
+
     // Creature +25% + Fury, type multiplier, Shout Power, then Quick Cast.
     const mult = typeMultiplier(spell.element, this.enemyElement());
     const power = this.shoutPower();
     const quick = this.quickBonus();
     const dmg = Math.max(1, Math.round(this.spellBase(spell) * mult * power.mult * quick));
-    this.castLine.setText(`You cast ${spell.name}  ×${power.mult}`);
+    this.castLine.setText(`${isMega ? "MEGA! " : "You cast "}${spell.name}  ×${power.mult}`);
 
     if (!this.strongestHit || dmg > this.strongestHit.damage) {
       this.strongestHit = { name: spell.name, damage: dmg };
@@ -1269,6 +1386,7 @@ export class BattleScene extends Phaser.Scene {
     this.anim.attack(this.playerView, () => {
       if (lethal) this.anim.setSlowMo(0.4); // the killing blow lands in slow motion
       sharedSound.whoosh(spell.element);
+      if (isMega) this.effects.screenFlash(255, 236, 150);
       if (power.crit) {
         sharedSound.crit();
         this.effects.screenFlash(255, 200, 255);
@@ -1308,6 +1426,33 @@ export class BattleScene extends Phaser.Scene {
         this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
       });
     });
+  }
+
+  /** A heal mends the active creature for 30% of its max HP and ends the turn.
+   *  Locks the heal again (counter reset). Common state is set by playerCast. */
+  private castHeal(): void {
+    this.active().healUsed = 0; // locks again after use
+    const amount = Math.max(1, Math.round(this.active().maxHp * HEAL_FRACTION_OF_MAX));
+    this.active().hp = Math.min(this.active().maxHp, this.active().hp + amount);
+    this.refreshPlayerHp(true);
+    this.castLine.setText(`${this.activeCreature().name} heals +${amount}`);
+
+    sharedSound.blip(880);
+    // A rising green "+N" over the creature.
+    const label = this.add
+      .text(this.playerPos.x, this.playerPos.y - 95, `+${amount}`, {
+        fontFamily: "monospace",
+        fontSize: "34px",
+        fontStyle: "bold",
+        color: "#58e39b",
+      })
+      .setOrigin(0.5)
+      .setDepth(72)
+      .setScale(0.5);
+    this.tweens.add({ targets: label, scale: 1, duration: 170, ease: "Back.easeOut" });
+    this.tweens.add({ targets: label, y: label.y - 60, alpha: 0, delay: 500, duration: 600, onComplete: () => label.destroy() });
+
+    this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
   }
 
   /** Boss down → victory; otherwise offer a reward, then the next challenger. */
@@ -1545,15 +1690,16 @@ export class BattleScene extends Phaser.Scene {
 
   private clearSeal(): void {
     this.sealedSpell = null;
-    this.applySealVisual();
+    this.updateCardStates();
   }
 
-  /** Reflect the sealed spell on the cards (chain icon + dimmed). */
-  private applySealVisual(): void {
+  /** Reflect lock (mega/heal not yet unlocked) and seal (Root) state on the
+   *  cards: a locked or sealed card is dimmed; a sealed card shows the chain. */
+  private updateCardStates(): void {
     for (const [name, c] of this.cards) {
       const sealed = name === this.sealedSpell;
       c.chain.setVisible(sealed);
-      c.bg.setAlpha(sealed ? 0.35 : 1);
+      c.card.setAlpha(sealed || c.locked ? 0.4 : 1);
     }
   }
 
@@ -1825,6 +1971,8 @@ export class BattleScene extends Phaser.Scene {
     this.party.forEach((m) => {
       m.hp = m.maxHp;
       m.fainted = false;
+      m.megaUsed = 0;
+      m.healUsed = 0;
     });
     this.activeIndex = Math.max(0, CREATURES.findIndex((c) => c.name === this.startCreature.name));
     this.playerGuard = false;
