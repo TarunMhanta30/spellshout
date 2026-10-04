@@ -20,6 +20,11 @@ export class AudioModule {
   /** Calibrated per-player baseline loudness; null until calibrated. */
   private baseline: number | null = null;
 
+  /** True once the mic is captured and loudness can be read. */
+  get ready(): boolean {
+    return this.analyser !== null && this.buffer !== null;
+  }
+
   /** Acquire the mic and build the analyser graph. Requires user gesture. */
   async init(): Promise<void> {
     if (this.context) return;

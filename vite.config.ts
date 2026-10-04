@@ -11,6 +11,7 @@ export default defineConfig({
       "@data": fileURLToPath(new URL("./src/data", import.meta.url)),
       "@animations": fileURLToPath(new URL("./src/animations", import.meta.url)),
       "@effects": fileURLToPath(new URL("./src/effects", import.meta.url)),
+      "@sprites": fileURLToPath(new URL("./src/sprites", import.meta.url)),
     },
   },
   server: {

@@ -292,12 +292,18 @@ export class EffectsModule {
 
   /* ----------------------------- camera ----------------------------- */
 
-  /** Shake scaled to damage; the biggest hits also get a quick zoom punch. */
-  cameraHit(damage: number): void {
+  /** Shake scaled to damage; the biggest hits also get a quick zoom punch.
+   *  `big` (a shout crit) shakes much harder. */
+  cameraHit(damage: number, big = false): void {
     const cam = this.scene.cameras.main;
-    const intensity = Phaser.Math.Clamp(0.002 + damage * 0.0007, 0.003, 0.018);
-    cam.shake(180, intensity);
-    if (damage >= 17) this.zoomPunch();
+    const intensity = Phaser.Math.Clamp((0.002 + damage * 0.0007) * (big ? 2.4 : 1), 0.003, 0.05);
+    cam.shake(big ? 340 : 180, intensity);
+    if (big || damage >= 17) this.zoomPunch();
+  }
+
+  /** A quick full-screen flash (used for shout crits). */
+  screenFlash(r = 255, g = 255, b = 255): void {
+    this.scene.cameras.main.flash(220, r, g, b);
   }
 
   private zoomPunch(): void {

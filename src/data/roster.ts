@@ -5,7 +5,7 @@
  * so speech recognition can't confuse them (see the Matcher tests).
  */
 
-export type Element = "fire" | "water" | "nature" | "void";
+export type Element = "fire" | "water" | "nature" | "void" | "shadow";
 
 export interface Spell {
   name: string;
@@ -13,14 +13,33 @@ export interface Spell {
   damage: number;
 }
 
+/**
+ * The direction each sprite's art natively faces. The humanoid player set faces
+ * right; the beast enemy set faces left. The shared placer flips to the side a
+ * creature is on (players right, enemies left), so this is the only place art
+ * facing lives.
+ */
+export const SPRITE_FACING: Record<string, "left" | "right"> = {
+  fire: "right",
+  water: "right",
+  nature: "right",
+  enemy: "right",
+  cinderjaw: "left",
+  maelstrom: "left",
+  blightroot: "left",
+  voidcrown: "left",
+};
+
 export const ELEMENT_COLOR: Record<Element, number> = {
   fire: 0xff6b4a,
   water: 0x4aa8ff,
   nature: 0x58e39b,
   void: 0x8b5cf6,
+  shadow: 0x9a92c7,
 };
 
-/** The player's Tier-1 spellbook — the three creatures' spells combined. */
+/** The player's spellbook — every creature's spells combined. Shadow spells are
+ *  neutral: they never get (or suffer) an element bonus. */
 export const PLAYER_SPELLS: Spell[] = [
   { name: "Molten Fang", element: "fire", damage: 18 },
   { name: "Ashen Roar", element: "fire", damage: 14 },
@@ -28,6 +47,8 @@ export const PLAYER_SPELLS: Spell[] = [
   { name: "Frozen Vault", element: "water", damage: 14 },
   { name: "Thorn Whip", element: "nature", damage: 16 },
   { name: "Bramble Snare", element: "nature", damage: 15 },
+  { name: "Dusk Veil", element: "shadow", damage: 16 },
+  { name: "Hollow Gaze", element: "shadow", damage: 15 },
 ];
 
 /** Damage multiplier a creature gets on spells of its own element. */
@@ -40,11 +61,13 @@ export interface Creature {
   textureKey: string;
 }
 
-/** The three selectable player creatures, one per element. */
+/** The selectable player creatures. Shade is the shadow creature (neutral:
+ *  no element advantage or weakness), using the old enemy sprite. */
 export const CREATURES: Creature[] = [
   { name: "Cinder", element: "fire", textureKey: "fire" },
   { name: "Ripple", element: "water", textureKey: "water" },
   { name: "Dryad", element: "nature", textureKey: "nature" },
+  { name: "Shade", element: "shadow", textureKey: "enemy" },
 ];
 
 export interface Combatant {
@@ -70,3 +93,56 @@ export const ENEMY: Combatant = {
     { name: "Night Gloom", element: "void", damage: 12 },
   ],
 };
+
+/* -------------------------------------------------------------------------- */
+/* Gauntlet                                                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface EnemyDef {
+  name: string;
+  /** "void" marks Voidcrown, which shifts element every turn. */
+  element: Element;
+  textureKey: string;
+  isBoss?: boolean;
+}
+
+/** The three mid enemies — they appear in random order before the boss. */
+export const GAUNTLET_MIDS: EnemyDef[] = [
+  { name: "Cinderjaw", element: "fire", textureKey: "cinderjaw" },
+  { name: "Maelstrom", element: "water", textureKey: "maelstrom" },
+  { name: "Blightroot", element: "nature", textureKey: "blightroot" },
+];
+
+/** Always the final boss. */
+export const BOSS: EnemyDef = { name: "Voidcrown", element: "void", textureKey: "voidcrown", isBoss: true };
+
+/** The three combat elements Voidcrown shifts between. */
+export const SHIFT_ELEMENTS: Array<"fire" | "water" | "nature"> = ["fire", "water", "nature"];
+
+/** Attack projectiles an enemy throws, keyed by its (current) element. */
+export const ENEMY_ATTACKS: Record<"fire" | "water" | "nature", Spell[]> = {
+  fire: [
+    { name: "Flame Lash", element: "fire", damage: 14 },
+    { name: "Ember Burst", element: "fire", damage: 12 },
+  ],
+  water: [
+    { name: "Wave Slam", element: "water", damage: 14 },
+    { name: "Frost Bite", element: "water", damage: 12 },
+  ],
+  nature: [
+    { name: "Vine Lash", element: "nature", damage: 14 },
+    { name: "Spore Blast", element: "nature", damage: 12 },
+  ],
+};
+
+/**
+ * Elemental type chart — fire > nature > water > fire. Returns the damage
+ * multiplier for `attack` hitting `defender`: 2 (super effective), 0.5
+ * (resisted), or 1. Shadow and raw void are neutral in both directions.
+ */
+export function typeMultiplier(attack: Element, defender: Element): number {
+  const beats: Partial<Record<Element, Element>> = { fire: "nature", nature: "water", water: "fire" };
+  if (beats[attack] === defender) return 2;
+  if (beats[defender] === attack) return 0.5;
+  return 1;
+}

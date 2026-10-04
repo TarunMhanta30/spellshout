@@ -15,7 +15,10 @@ const SPELLS = [
   "Frozen Vault",
   "Thorn Whip",
   "Bramble Snare",
+  "Dusk Veil",
+  "Hollow Gaze",
   "Void Shriek",
+  "Night Gloom",
 ];
 
 interface Case {
@@ -32,7 +35,12 @@ const CASES: Case[] = [
   { heard: "frozen fault", expected: "Frozen Vault", note: "vault → fault (v/f)" },
   { heard: "torn whip", expected: "Thorn Whip", note: "dropped the 'th'" },
   { heard: "bramble stair", expected: "Bramble Snare", note: "snare → stair" },
+  { heard: "dusk veil", expected: "Dusk Veil", note: "exact (shadow)" },
+  { heard: "dusk vale", expected: "Dusk Veil", note: "veil → vale" },
+  { heard: "hollow gaze", expected: "Hollow Gaze", note: "exact (shadow)" },
+  { heard: "hallow gaze", expected: "Hollow Gaze", note: "hollow → hallow" },
   { heard: "avoid shriek", expected: "Void Shriek", note: "void → avoid" },
+  { heard: "night gloom", expected: "Night Gloom", note: "exact (enemy)" },
   { heard: "pizza delivery", expected: null, note: "unrelated — must fail" },
   { heard: "golden bolt", expected: null, note: "near-ish nonsense — must fail" },
 ];

@@ -25,7 +25,8 @@
       "@scenes/*": ["src/scenes/*"],
       "@data/*": ["src/data/*"],
       "@animations/*": ["src/animations/*"],
-      "@effects/*": ["src/effects/*"]
+      "@effects/*": ["src/effects/*"],
+      "@sprites/*": ["src/sprites/*"]
     }
   },
   "include": ["src"]

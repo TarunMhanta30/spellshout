@@ -176,6 +176,7 @@ export class AnimationsModule {
           .setOrigin(0.5, 1)
           .setScale(img.scaleX, img.scaleY)
           .setAngle(img.angle)
+          .setFlipX(img.flipX)
           .setAlpha(0.45)
           .setTint(0x9a92c7)
           .setDepth(img.depth - 1);

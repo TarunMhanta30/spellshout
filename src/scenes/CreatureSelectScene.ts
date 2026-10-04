@@ -1,14 +1,14 @@
 import Phaser from "phaser";
-import { VoiceModule } from "@voice/VoiceModule";
-import { sharedVoice } from "@voice/sharedVoice";
+import { inputRouter } from "@voice/InputRouter";
 import { Matcher } from "@matcher/Matcher";
 import { matchCommand } from "@matcher/command";
 import { AnimationsModule, type CreatureView } from "@animations/AnimationsModule";
 import { EffectsModule } from "@effects/EffectsModule";
+import { placeCreature } from "@sprites/creatureSprite";
+import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
 import { CREATURES, ELEMENT_COLOR, type Creature } from "@data/roster";
 
 const GROUND_Y = 360;
-const CREATURE_H = 230;
 
 /**
  * CreatureSelectScene — pick your creature by voice.
@@ -60,13 +60,18 @@ export class CreatureSelectScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    // Three creatures side by side, each with the same idle breathing.
-    const slots = [0.22, 0.5, 0.78];
+    // Creatures side by side, evenly spaced, each with the same idle breathing.
+    const n = CREATURES.length;
+    const creatureH = n >= 4 ? 185 : 230; // shrink to fit when there are four
     CREATURES.forEach((c, i) => {
-      const x = width * slots[i];
-      const img = this.add.image(x, GROUND_Y, c.textureKey).setOrigin(0.5, 1);
-      img.setScale(CREATURE_H / img.height);
-      this.add.ellipse(x, GROUND_Y, img.displayWidth * 0.72, 30, 0x000000, 0.35).setDepth(-1);
+      const x = width * ((i + 1) / (n + 1));
+      const { image: img } = placeCreature(this, {
+        key: c.textureKey,
+        x,
+        side: "player",
+        groundY: GROUND_Y,
+        height: creatureH,
+      });
 
       const label = this.add
         .text(x, GROUND_Y + 16, c.name, {
@@ -92,22 +97,18 @@ export class CreatureSelectScene extends Phaser.Scene {
       .setOrigin(0.5);
     this.tweens.add({ targets: this.prompt, alpha: { from: 1, to: 0.55 }, duration: 700, yoyo: true, repeat: -1 });
 
-    if (!VoiceModule.isSupported()) {
-      this.prompt.setText("Web Speech API unavailable — use Chrome.");
-      return;
-    }
-    // Mic is already running from the title; this just swaps in our handler.
-    sharedVoice.start(
-      (update) => this.onVoice(update.interim, update.final),
+    // Route through the active engine (Chrome speech or the Wispr bar).
+    inputRouter.listen(
+      (text) => this.onPhrase(text),
       (err) => this.prompt.setText(`Mic error: ${err}`),
     );
   }
 
-  private onVoice(interim: string, final: string): void {
-    const heard = interim || tailWords(final, 3);
-    if (this.chosen || !heard) return;
+  private onPhrase(text: string): void {
+    if (handleSoundCommand(text)) return;
+    if (this.chosen || !text) return;
 
-    const result = matchCommand(this.matcher, heard);
+    const result = matchCommand(this.matcher, text);
     if (!result) return;
     const creature = CREATURES.find((c) => c.name === result.phrase);
     if (creature) this.choose(creature);
@@ -115,6 +116,7 @@ export class CreatureSelectScene extends Phaser.Scene {
 
   private choose(creature: Creature): void {
     this.chosen = true;
+    sharedSound.blip(740);
     this.prompt.setText(`${creature.name} chosen!`);
     this.tweens.killTweensOf(this.prompt);
     this.prompt.setAlpha(1);
@@ -144,12 +146,7 @@ export class CreatureSelectScene extends Phaser.Scene {
 
     this.time.delayedCall(750, () => {
       this.effects.chargeGlowOff(img);
-      this.scene.start("Battle", { creature });
+      this.scene.start("Calibrate", { creature });
     });
   }
-}
-
-/** Keep only the last n whitespace-separated words of a string. */
-function tailWords(text: string, n: number): string {
-  return text.trim().split(/\s+/).filter(Boolean).slice(-n).join(" ");
 }
