@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import { inputRouter } from "@voice/InputRouter";
 import { Matcher } from "@matcher/Matcher";
-import { heardCommand } from "@matcher/command";
+import { heardCommand, matchCommand } from "@matcher/command";
 import { AnimationsModule, type CreatureView } from "@animations/AnimationsModule";
 import { EffectsModule } from "@effects/EffectsModule";
 import { placeCreature, GROUND_Y, CREATURE_H } from "@sprites/creatureSprite";
@@ -63,7 +63,22 @@ const GAUGE_BOTTOM = 410;
 const GAUGE_H = 232;
 const GAUGE_W = 18;
 
-type Turn = "idle" | "player" | "enemy" | "result";
+type Turn = "idle" | "player" | "enemy" | "result" | "reward";
+
+/** Signature move cadence and tuning. */
+const SIGNATURE_EVERY = 3;
+const BURN_DMG = 4;
+const BURN_TURNS = 3;
+const CATACLYSM_DMG = 35;
+const CATACLYSM_CHARGE = 2;
+/** Quick Cast: casting within this window adds a bonus. */
+const QUICK_MS = 3000;
+const QUICK_BONUS = 1.1;
+/** Reward tuning. */
+const MEND_FRACTION = 0.4;
+const SURGE_CHARGE = 50;
+const ECHO_BONUS = 2.0;
+const FURY_MULT = 1.2;
 
 interface HpBar {
   fill: Phaser.GameObjects.Rectangle;
@@ -115,6 +130,28 @@ export class BattleScene extends Phaser.Scene {
   private enemyShadow?: Phaser.GameObjects.Ellipse;
   private bossAura?: Phaser.GameObjects.Image;
   private bossLabel?: Phaser.GameObjects.Text;
+
+  // Per-fight signature / status state.
+  private enemyTurnCount = 0;
+  private playerBurn = 0;
+  private enemyShield = false;
+  private sealedSpell: string | null = null;
+  private cataclysmCountdown = 0;
+  private cataclysmLabel?: Phaser.GameObjects.Text;
+  private warnText?: Phaser.GameObjects.Text;
+  private turnStartTime = 0;
+
+  // Run-long upgrades.
+  private comboBonus = COMBO_BONUS;
+  private furyMult: Partial<Record<Element, number>> = {};
+
+  // UI refs.
+  private readonly cards = new Map<string, { bg: Phaser.GameObjects.Rectangle; chain: Phaser.GameObjects.Text }>();
+  private progressLayer?: Phaser.GameObjects.Container;
+  private progressCrosses: Phaser.GameObjects.Text[] = [];
+  private rewardLayer?: Phaser.GameObjects.Container;
+  private rewardMatcher?: Matcher;
+  private rewardOptions: { kind: string; word: string; element?: Element }[] = [];
 
   // Shout Power: peak mic loudness since the player's turn began / last cast.
   private peakLoudness = 0;
@@ -209,6 +246,7 @@ export class BattleScene extends Phaser.Scene {
 
     // Gauntlet order: the three mid enemies shuffled, then the boss last.
     this.gauntlet = [...Phaser.Utils.Array.Shuffle([...GAUNTLET_MIDS]), BOSS];
+    this.createProgressIcons();
 
     // HP bars (the enemy's name/HP are filled in as each challenger spawns).
     this.playerBar = this.createHpBar(50, 48, 340, this.chosenCreature.name, "left");
@@ -434,8 +472,41 @@ export class BattleScene extends Phaser.Scene {
           color: boosted ? "#ffd36b" : "#9a92c7",
         })
         .setOrigin(0.5);
-      this.cardLayer.add([bg, dot, name, meta]);
+      // Chain overlay shown when the spell is sealed by Blightroot's Root.
+      const chain = this.add
+        .text(cx, cy, "⛓", { fontFamily: "monospace", fontSize: "30px", color: "#ffffff" })
+        .setOrigin(0.5)
+        .setVisible(false);
+      this.cardLayer.add([bg, dot, name, meta, chain]);
+      this.cards.set(spell.name, { bg, chain });
     });
+  }
+
+  /** Four icons at the top for the gauntlet; beaten enemies get crossed out. */
+  private createProgressIcons(): void {
+    this.progressLayer?.destroy(true);
+    const { width } = this.scale;
+    const n = this.gauntlet.length;
+    const gap = 44;
+    const startX = width / 2 - ((n - 1) * gap) / 2;
+    this.progressCrosses = [];
+    const objs: Phaser.GameObjects.GameObject[] = [];
+    this.gauntlet.forEach((e, i) => {
+      const x = startX + i * gap;
+      objs.push(this.add.circle(x, 14, 9, e.isBoss ? 0x8b5cf6 : ELEMENT_COLOR[e.element]).setStrokeStyle(1, 0x14121f));
+      objs.push(
+        this.add
+          .text(x, 14, e.name[0], { fontFamily: "monospace", fontSize: "11px", fontStyle: "bold", color: "#14121f" })
+          .setOrigin(0.5),
+      );
+      const cross = this.add
+        .text(x, 14, "✕", { fontFamily: "monospace", fontSize: "18px", fontStyle: "bold", color: "#ff5a5a" })
+        .setOrigin(0.5)
+        .setVisible(false);
+      objs.push(cross);
+      this.progressCrosses.push(cross);
+    });
+    this.progressLayer = this.add.container(0, 0, objs);
   }
 
   /** Whether this spell gets the chosen creature's +25% bonus. Shadow is
@@ -444,9 +515,42 @@ export class BattleScene extends Phaser.Scene {
     return spell.element === this.chosenCreature.element && this.chosenCreature.element !== "shadow";
   }
 
-  /** Spell damage after the chosen creature's same-element +25% bonus. */
+  /** Spell damage after the chosen creature's same-element +25% bonus (cards). */
   private effectiveDamage(spell: Spell): number {
     return this.isBoosted(spell) ? Math.round(spell.damage * ELEMENT_BONUS) : spell.damage;
+  }
+
+  /** Base damage before type/power/quick: creature +25% and any Fury bonus. */
+  private spellBase(spell: Spell): number {
+    const creature = this.isBoosted(spell) ? ELEMENT_BONUS : 1;
+    const fury = this.furyMult[spell.element] ?? 1;
+    return spell.damage * creature * fury;
+  }
+
+  private quickBonus(): number {
+    return this.time.now - this.turnStartTime <= QUICK_MS ? QUICK_BONUS : 1;
+  }
+
+  private showQuick(): void {
+    const t = this.add
+      .text(this.playerPos.x, this.playerPos.y - 95, "QUICK!", {
+        fontFamily: "monospace",
+        fontSize: "20px",
+        fontStyle: "bold",
+        color: "#58e39b",
+      })
+      .setOrigin(0.5)
+      .setDepth(72)
+      .setScale(0.6);
+    this.tweens.add({ targets: t, scale: 1, duration: 150, ease: "Back.easeOut" });
+    this.tweens.add({ targets: t, y: t.y - 36, alpha: 0, delay: 450, duration: 450, onComplete: () => t.destroy() });
+  }
+
+  private interruptCataclysm(): void {
+    this.cataclysmCountdown = 0;
+    this.cataclysmLabel?.destroy();
+    this.cataclysmLabel = undefined;
+    this.announceTurn("CATACLYSM INTERRUPTED!", "#58e39b");
   }
 
   /** Grey the spell cards out when it isn't the player's turn. */
@@ -492,6 +596,17 @@ export class BattleScene extends Phaser.Scene {
     this.enemyShadow = undefined;
     this.bossAura = undefined;
     this.bossLabel = undefined;
+
+    // Reset per-fight signature / status state.
+    this.enemyTurnCount = 0;
+    this.enemyShield = false;
+    this.cataclysmCountdown = 0;
+    this.playerBurn = 0;
+    this.cataclysmLabel?.destroy();
+    this.cataclysmLabel = undefined;
+    this.warnText?.destroy();
+    this.warnText = undefined;
+    this.clearSeal();
 
     if (heal) {
       this.playerHp = Math.min(PLAYER.maxHp, this.playerHp + Math.round(PLAYER.maxHp * HEAL_FRACTION));
@@ -607,6 +722,15 @@ export class BattleScene extends Phaser.Scene {
       return;
     }
 
+    // On the reward screen, pick an upgrade by its word.
+    if (this.turn === "reward") {
+      if (text && this.rewardMatcher) {
+        const m = matchCommand(this.rewardMatcher, text);
+        if (m) this.applyReward(m.phrase);
+      }
+      return;
+    }
+
     // Only the player's turn listens — all input is ignored otherwise.
     if (this.turn !== "player") return;
 
@@ -658,7 +782,7 @@ export class BattleScene extends Phaser.Scene {
         if (i + size > words.length) continue;
         const r = this.matcher.match(words.slice(i, i + size).join(" "));
         const spell = r && PLAYER_SPELLS.find((s) => s.name === r.phrase);
-        if (spell) hits.push({ spell, start: i, end: i + size - 1, conf: r.confidence });
+        if (spell && spell.name !== this.sealedSpell) hits.push({ spell, start: i, end: i + size - 1, conf: r.confidence });
       }
     }
     // Greedily take the highest-confidence, non-overlapping, distinct spells.
@@ -678,10 +802,9 @@ export class BattleScene extends Phaser.Scene {
     return picks.map((p) => p.spell);
   }
 
-  /** Spell damage after the creature +25% and the elemental type multiplier. */
+  /** Spell damage after creature/Fury base and the elemental type multiplier. */
   private spellDamage(spell: Spell): number {
-    const base = this.isBoosted(spell) ? spell.damage * ELEMENT_BONUS : spell.damage;
-    return Math.max(1, Math.round(base * typeMultiplier(spell.element, this.enemyElement())));
+    return Math.max(1, Math.round(this.spellBase(spell) * typeMultiplier(spell.element, this.enemyElement())));
   }
 
   /** Cast two spells at once: combined damage × COMBO_BONUS, with a banner. */
@@ -692,13 +815,16 @@ export class BattleScene extends Phaser.Scene {
     this.pendingSpell = undefined;
 
     const power = this.shoutPower();
-    const dmg = Math.max(1, Math.round((this.spellDamage(a) + this.spellDamage(b)) * COMBO_BONUS * power.mult));
+    const quick = this.quickBonus();
+    const dmg = Math.max(1, Math.round((this.spellDamage(a) + this.spellDamage(b)) * this.comboBonus * power.mult * quick));
     this.castLine.setText(`Combo! ${a.name} + ${b.name}  ×${power.mult}`);
     if (!this.strongestHit || dmg > this.strongestHit.damage) {
       this.strongestHit = { name: `${a.name} + ${b.name}`, damage: dmg };
     }
     this.announceTurn("COMBO", "#ff6bd6");
 
+    const superEff =
+      typeMultiplier(a.element, this.enemyElement()) === 2 || typeMultiplier(b.element, this.enemyElement()) === 2;
     const lethal = this.enemyHp - dmg <= 0;
     const els: Element[] = [a.element, b.element];
 
@@ -714,11 +840,21 @@ export class BattleScene extends Phaser.Scene {
           sharedSound.whoosh(el);
           this.effects.launchProjectile(el, this.playerPos, this.enemyPos, PROJECTILE_MS, () => {
             if (!last) return;
+            if (this.shieldBlocks(superEff)) {
+              this.anim.setSlowMo(1);
+              this.showBlocked();
+              sharedSound.impact(2);
+              this.anim.hit(this.enemyView, 2);
+              this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+              return;
+            }
             this.enemyHp = Math.max(0, this.enemyHp - dmg);
             this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
             this.effects.cameraHit(dmg, power.crit);
             sharedSound.impact(dmg);
             this.showPower(power);
+            if (quick > 1) this.showQuick();
+            if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
             this.addUltCharge(ULT_CHARGE_PER_HIT);
 
             if (lethal) {
@@ -854,7 +990,22 @@ export class BattleScene extends Phaser.Scene {
     this.pendingTimer = undefined;
     this.pendingSpell = undefined;
     this.peakLoudness = 0; // peak is per utterance / since last cast
+    this.turnStartTime = this.time.now; // for Quick Cast
     this.heardLine.setText("Heard: —");
+    this.applySealVisual();
+
+    // Burn ticks at the start of each of the player's turns.
+    if (this.playerBurn > 0) {
+      this.playerBurn -= 1;
+      this.playerHp = Math.max(0, this.playerHp - BURN_DMG);
+      this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+      this.anim.floatingDamage(this.playerPos.x, this.playerPos.y - 90, BURN_DMG);
+      sharedSound.impact(BURN_DMG);
+      if (this.playerHp <= 0) {
+        this.showResult(false);
+        return;
+      }
+    }
 
     if (this.ultCharge >= 100) {
       // Ultimate ready: this turn is a free-sentence describe-your-attack.
@@ -877,17 +1028,18 @@ export class BattleScene extends Phaser.Scene {
     this.turn = "idle";
     this.banner.setText("");
 
-    // Creature +25%, elemental type multiplier, then Shout Power.
-    const base = this.isBoosted(spell) ? spell.damage * ELEMENT_BONUS : spell.damage;
+    // Creature +25% + Fury, type multiplier, Shout Power, then Quick Cast.
     const mult = typeMultiplier(spell.element, this.enemyElement());
     const power = this.shoutPower();
-    const dmg = Math.max(1, Math.round(base * mult * power.mult));
+    const quick = this.quickBonus();
+    const dmg = Math.max(1, Math.round(this.spellBase(spell) * mult * power.mult * quick));
     this.castLine.setText(`You cast ${spell.name}  ×${power.mult}`);
 
     if (!this.strongestHit || dmg > this.strongestHit.damage) {
       this.strongestHit = { name: spell.name, damage: dmg };
     }
 
+    const superEff = mult === 2;
     const lethal = this.enemyHp - dmg <= 0;
 
     this.anim.attack(this.playerView, () => {
@@ -898,12 +1050,22 @@ export class BattleScene extends Phaser.Scene {
         this.effects.screenFlash(255, 200, 255);
       }
       this.effects.launchProjectile(spell.element, this.playerPos, this.enemyPos, PROJECTILE_MS, () => {
+        if (this.shieldBlocks(superEff)) {
+          this.anim.setSlowMo(1);
+          this.showBlocked();
+          sharedSound.impact(2);
+          this.anim.hit(this.enemyView, 2);
+          this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+          return;
+        }
         this.enemyHp = Math.max(0, this.enemyHp - dmg);
         this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
         this.effects.cameraHit(dmg, power.crit);
         sharedSound.impact(dmg);
         this.showEffectiveness(mult, this.enemyPos.x, this.enemyPos.y - 120);
         this.showPower(power);
+        if (quick > 1) this.showQuick();
+        if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
         this.addUltCharge(ULT_CHARGE_PER_HIT); // landing a hit charges the ultimate
 
         if (lethal) {
@@ -923,10 +1085,85 @@ export class BattleScene extends Phaser.Scene {
     });
   }
 
-  /** Boss down → victory; otherwise the next challenger enters (and heals you). */
+  /** Boss down → victory; otherwise offer a reward, then the next challenger. */
   private onEnemyDefeated(): void {
+    this.progressCrosses[this.enemyIndex]?.setVisible(true);
     if (this.enemyDef.isBoss) this.showResult(true);
-    else this.spawnEnemy(this.enemyIndex + 1, true);
+    else this.showRewards();
+  }
+
+  /* --------------------------------------------------------------------- */
+  /* Rewards                                                                */
+  /* --------------------------------------------------------------------- */
+
+  private showRewards(): void {
+    this.turn = "reward";
+    this.banner.setText("");
+    sharedSound.victory();
+
+    const furyElement = Phaser.Utils.Array.GetRandom(["fire", "water", "nature"]) as Element;
+    const all = [
+      { kind: "fury", word: "fury", title: "FURY", desc: `+20% ${furyElement} damage`, element: furyElement },
+      { kind: "mend", word: "mend", title: "MEND", desc: "Heal 40% HP", element: undefined },
+      { kind: "surge", word: "surge", title: "SURGE", desc: "Ultimate starts half full", element: undefined },
+      { kind: "echo", word: "echo", title: "ECHO", desc: "Combo bonus becomes 2×", element: undefined },
+    ];
+    const picks = Phaser.Utils.Array.Shuffle(all).slice(0, 2);
+    this.rewardOptions = picks.map((p) => ({ kind: p.kind, word: p.word, element: p.element }));
+    this.rewardMatcher = new Matcher(
+      picks.map((p) => p.word),
+      { threshold: 0.6 },
+    );
+
+    const { width, height } = this.scale;
+    const dim = this.add.rectangle(0, 0, width, height, 0x000000, 0.8).setOrigin(0, 0);
+    const heading = this.add
+      .text(width / 2, 72, "CHOOSE A REWARD", { fontFamily: "monospace", fontSize: "34px", fontStyle: "bold", color: "#e9e4ff" })
+      .setOrigin(0.5);
+    const objs: Phaser.GameObjects.GameObject[] = [dim, heading];
+    picks.forEach((p, i) => {
+      const cx = width / 2 + (i === 0 ? -168 : 168);
+      const cy = height / 2 + 10;
+      objs.push(this.add.rectangle(cx, cy, 290, 300, 0x1e1b2e).setStrokeStyle(3, 0x7c6cff));
+      objs.push(
+        this.add.text(cx, cy - 95, p.title, { fontFamily: "monospace", fontSize: "38px", fontStyle: "bold", color: "#ffd36b" }).setOrigin(0.5),
+      );
+      objs.push(
+        this.add
+          .text(cx, cy, p.desc, { fontFamily: "monospace", fontSize: "19px", color: "#e9e4ff", align: "center", wordWrap: { width: 250 } })
+          .setOrigin(0.5),
+      );
+      objs.push(
+        this.add.text(cx, cy + 115, `say "${p.word}"`, { fontFamily: "monospace", fontSize: "22px", fontStyle: "bold", color: "#b79cff" }).setOrigin(0.5),
+      );
+    });
+    this.rewardLayer = this.add.container(0, 0, objs).setDepth(100);
+  }
+
+  private applyReward(word: string): void {
+    const opt = this.rewardOptions.find((o) => o.word === word);
+    if (!opt) return;
+    switch (opt.kind) {
+      case "fury":
+        if (opt.element) this.furyMult[opt.element] = (this.furyMult[opt.element] ?? 1) * FURY_MULT;
+        break;
+      case "mend":
+        this.playerHp = Math.min(PLAYER.maxHp, this.playerHp + Math.round(PLAYER.maxHp * MEND_FRACTION));
+        this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+        break;
+      case "surge":
+        this.ultCharge = Math.max(this.ultCharge, SURGE_CHARGE);
+        this.updateUltMeter();
+        break;
+      case "echo":
+        this.comboBonus = ECHO_BONUS;
+        break;
+    }
+    sharedSound.blip(880);
+    this.rewardLayer?.destroy(true);
+    this.rewardLayer = undefined;
+    this.rewardMatcher = undefined;
+    this.spawnEnemy(this.enemyIndex + 1, true);
   }
 
   private startEnemyTurn(): void {
@@ -934,16 +1171,31 @@ export class BattleScene extends Phaser.Scene {
     this.turn = "enemy";
     this.setCardsEnabled(false);
     this.heardLine.setText("Heard: — (mic paused)");
+    this.clearSeal(); // the player's turn has ended
+    this.enemyTurnCount += 1;
 
     if (this.enemyDef.isBoss) this.shiftBossElement(); // shifts every boss turn
 
+    this.banner.setText(`${this.enemyDef.name}'s turn`);
+    this.announceTurn(`${this.enemyDef.name.toUpperCase()}'S TURN`, `#${ELEMENT_COLOR[this.enemyElement()].toString(16)}`);
+
+    // Continuing a Cataclysm charge?
+    if (this.cataclysmCountdown > 0) {
+      this.time.delayedCall(TURN_BANNER_MS, () => this.advanceCataclysm());
+      return;
+    }
+
+    // Signature move every Nth turn (warned the turn before).
+    if (this.enemyTurnCount % SIGNATURE_EVERY === 0) {
+      this.time.delayedCall(TURN_BANNER_MS, () => this.performSignature());
+      return;
+    }
+
+    // Otherwise a normal attack; warn if a signature is coming next turn.
     const element = this.enemyElement();
     const attack = Phaser.Utils.Array.GetRandom(ENEMY_ATTACKS[element as "fire" | "water" | "nature"]);
+    const warnNext = (this.enemyTurnCount + 1) % SIGNATURE_EVERY === 0;
 
-    this.banner.setText(`${this.enemyDef.name}'s turn`);
-    this.announceTurn(`${this.enemyDef.name.toUpperCase()}'S TURN`, `#${ELEMENT_COLOR[element].toString(16)}`);
-
-    // Telegraph the attack for one second before it lands.
     this.time.delayedCall(TURN_BANNER_MS, () => {
       if (this.turn !== "enemy") return;
       this.showCharge(`${this.enemyDef.name} is charging ${attack.name}`);
@@ -952,18 +1204,133 @@ export class BattleScene extends Phaser.Scene {
         if (this.turn !== "enemy") return;
         this.hideCharge();
         this.effects.chargeGlowOff(this.enemyShape);
+        if (warnNext) this.showSignatureWarning();
         this.enemyAttack(attack, element);
       });
     });
   }
 
-  private enemyAttack(attack: Spell, element: Element): void {
-    this.castLine.setText(`${this.enemyDef.name} cast ${attack.name}`);
+  /* --------------------------------------------------------------------- */
+  /* Signature moves + status effects                                       */
+  /* --------------------------------------------------------------------- */
 
-    const mult = typeMultiplier(element, this.chosenCreature.element);
-    const dmg = Math.max(1, Math.round(attack.damage * GAUNTLET_DMG[this.enemyIndex] * mult));
+  private showSignatureWarning(): void {
+    this.warnText?.destroy();
+    this.warnText = this.add
+      .text(this.scale.width / 2, 96, `⚠ ${this.enemyDef.name} will use ${this.enemyDef.signatureName} next turn!`, {
+        fontFamily: "monospace",
+        fontSize: "17px",
+        fontStyle: "bold",
+        color: "#14121f",
+        backgroundColor: "#ffb84a",
+        padding: { x: 10, y: 5 },
+      })
+      .setOrigin(0.5)
+      .setDepth(62);
+  }
+
+  private performSignature(): void {
+    if (this.turn !== "enemy") return;
+    const def = this.enemyDef;
+    this.warnText?.destroy();
+    this.warnText = undefined;
+    this.announceTurn(def.signatureName.toUpperCase(), "#ff6bd6");
+    this.effects.chargeGlowOn(this.enemyShape, ELEMENT_COLOR[this.enemyElement()]);
+    this.time.delayedCall(700, () => this.effects.chargeGlowOff(this.enemyShape));
+    sharedSound.crit();
+
+    switch (def.signature) {
+      case "burn":
+        this.playerBurn = BURN_TURNS;
+        this.castLine.setText(`${def.name} uses Burn! (${BURN_DMG}/turn × ${BURN_TURNS})`);
+        break;
+      case "tide":
+        this.enemyShield = true;
+        this.castLine.setText(`${def.name} raises Tide Shield!`);
+        break;
+      case "root": {
+        const spell = Phaser.Utils.Array.GetRandom(PLAYER_SPELLS) as Spell;
+        this.sealedSpell = spell.name;
+        this.castLine.setText(`${def.name} uses Root! ${spell.name} sealed.`);
+        break;
+      }
+      case "cataclysm":
+        this.cataclysmCountdown = CATACLYSM_CHARGE;
+        this.ensureCataclysmLabel();
+        this.updateCataclysmLabel();
+        this.castLine.setText(`${def.name} begins Cataclysm!`);
+        break;
+    }
+
+    this.time.delayedCall(RESOLVE_BEAT_MS + 700, () => this.startPlayerTurn());
+  }
+
+  private advanceCataclysm(): void {
+    if (this.turn !== "enemy") return;
+    this.cataclysmCountdown -= 1;
+    this.updateCataclysmLabel();
+    if (this.cataclysmCountdown <= 0) {
+      this.cataclysmLabel?.destroy();
+      this.cataclysmLabel = undefined;
+      this.announceTurn("CATACLYSM!", "#ff6bd6");
+      this.castLine.setText(`${this.enemyDef.name} unleashes Cataclysm!`);
+      this.effects.screenFlash(255, 150, 255);
+      this.time.delayedCall(600, () => this.enemyStrike(CATACLYSM_DMG, this.enemyElement()));
+    } else {
+      this.banner.setText(`Cataclysm in ${this.cataclysmCountdown}…`);
+      this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startPlayerTurn());
+    }
+  }
+
+  private ensureCataclysmLabel(): void {
+    if (this.cataclysmLabel) return;
+    this.cataclysmLabel = this.add
+      .text(this.enemyBaseX, 100, "", { fontFamily: "monospace", fontSize: "18px", fontStyle: "bold", color: "#ff6bd6" })
+      .setOrigin(0.5)
+      .setDepth(62);
+  }
+
+  private updateCataclysmLabel(): void {
+    this.cataclysmLabel?.setText(`☄ CATACLYSM ${Math.max(0, this.cataclysmCountdown)}`);
+  }
+
+  private clearSeal(): void {
+    this.sealedSpell = null;
+    this.applySealVisual();
+  }
+
+  /** Reflect the sealed spell on the cards (chain icon + dimmed). */
+  private applySealVisual(): void {
+    for (const [name, c] of this.cards) {
+      const sealed = name === this.sealedSpell;
+      c.chain.setVisible(sealed);
+      c.bg.setAlpha(sealed ? 0.35 : 1);
+    }
+  }
+
+  /** Tide Shield: returns true if this hit is blocked (consumes the shield). */
+  private shieldBlocks(superEffective: boolean): boolean {
+    if (!this.enemyShield) return false;
+    this.enemyShield = false;
+    return !superEffective;
+  }
+
+  private showBlocked(): void {
+    const t = this.add
+      .text(this.enemyPos.x, this.enemyPos.y - 120, "BLOCKED", {
+        fontFamily: "monospace",
+        fontSize: "22px",
+        fontStyle: "bold",
+        color: "#4aa8ff",
+      })
+      .setOrigin(0.5)
+      .setDepth(72);
+    this.tweens.add({ targets: t, y: t.y - 36, alpha: 0, duration: 700, onComplete: () => t.destroy() });
+  }
+
+  /** A generic enemy strike (used by normal attacks and Cataclysm). */
+  private enemyStrike(dmg: number, element: Element, effMult?: number): void {
     const lethal = this.playerHp - dmg <= 0;
-
     this.anim.attack(this.enemyView, () => {
       if (lethal) this.anim.setSlowMo(0.4);
       sharedSound.whoosh(element);
@@ -972,9 +1339,9 @@ export class BattleScene extends Phaser.Scene {
         this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
         this.effects.cameraHit(dmg);
         sharedSound.impact(dmg);
-        this.showEffectiveness(mult, this.playerPos.x, this.playerPos.y - 120);
+        if (effMult !== undefined) this.showEffectiveness(effMult, this.playerPos.x, this.playerPos.y - 120);
 
-        if (lethal) {
+        if (this.playerHp <= 0) {
           this.anim.hit(this.playerView, dmg, {
             resumeIdle: false,
             onComplete: () => {
@@ -988,6 +1355,13 @@ export class BattleScene extends Phaser.Scene {
         this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startPlayerTurn());
       });
     });
+  }
+
+  private enemyAttack(attack: Spell, element: Element): void {
+    this.castLine.setText(`${this.enemyDef.name} cast ${attack.name}`);
+    const mult = typeMultiplier(element, this.chosenCreature.element);
+    const dmg = Math.max(1, Math.round(attack.damage * GAUNTLET_DMG[this.enemyIndex] * mult));
+    this.enemyStrike(dmg, element, mult);
   }
 
   /** "SUPER EFFECTIVE" / "RESISTED" pop-up over the target (nothing at ×1). */
@@ -1159,6 +1533,11 @@ export class BattleScene extends Phaser.Scene {
     this.pendingTimer?.remove();
     this.pendingTimer = undefined;
     this.pendingSpell = undefined;
+    this.comboBonus = COMBO_BONUS;
+    this.furyMult = {};
+    this.rewardLayer?.destroy(true);
+    this.rewardLayer = undefined;
+    this.rewardMatcher = undefined;
     this.clearStatusLines();
 
     // Restore the player from any defeat state (grey/toppled/faded).
@@ -1167,6 +1546,7 @@ export class BattleScene extends Phaser.Scene {
     // Fresh gauntlet order, back to the first challenger (spawnEnemy clears the
     // current enemy sprite).
     this.gauntlet = [...Phaser.Utils.Array.Shuffle([...GAUNTLET_MIDS]), BOSS];
+    this.createProgressIcons();
     this.spawnEnemy(0, false);
   }
 }

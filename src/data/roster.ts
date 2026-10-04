@@ -98,23 +98,34 @@ export const ENEMY: Combatant = {
 /* Gauntlet                                                                   */
 /* -------------------------------------------------------------------------- */
 
+export type Signature = "burn" | "tide" | "root" | "cataclysm";
+
 export interface EnemyDef {
   name: string;
   /** "void" marks Voidcrown, which shifts element every turn. */
   element: Element;
   textureKey: string;
   isBoss?: boolean;
+  signature: Signature;
+  signatureName: string;
 }
 
 /** The three mid enemies — they appear in random order before the boss. */
 export const GAUNTLET_MIDS: EnemyDef[] = [
-  { name: "Cinderjaw", element: "fire", textureKey: "cinderjaw" },
-  { name: "Maelstrom", element: "water", textureKey: "maelstrom" },
-  { name: "Blightroot", element: "nature", textureKey: "blightroot" },
+  { name: "Cinderjaw", element: "fire", textureKey: "cinderjaw", signature: "burn", signatureName: "Burn" },
+  { name: "Maelstrom", element: "water", textureKey: "maelstrom", signature: "tide", signatureName: "Tide Shield" },
+  { name: "Blightroot", element: "nature", textureKey: "blightroot", signature: "root", signatureName: "Root" },
 ];
 
 /** Always the final boss. */
-export const BOSS: EnemyDef = { name: "Voidcrown", element: "void", textureKey: "voidcrown", isBoss: true };
+export const BOSS: EnemyDef = {
+  name: "Voidcrown",
+  element: "void",
+  textureKey: "voidcrown",
+  isBoss: true,
+  signature: "cataclysm",
+  signatureName: "Cataclysm",
+};
 
 /** The three combat elements Voidcrown shifts between. */
 export const SHIFT_ELEMENTS: Array<"fire" | "water" | "nature"> = ["fire", "water", "nature"];
