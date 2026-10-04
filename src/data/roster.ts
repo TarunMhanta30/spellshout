@@ -59,15 +59,18 @@ export interface Creature {
   element: Element;
   /** Texture key for the creature's sprite (also its art filename stem). */
   textureKey: string;
+  /** This creature's own two spells (all it can cast). */
+  spells: Spell[];
 }
 
-/** The selectable player creatures. Shade is the shadow creature (neutral:
- *  no element advantage or weakness), using the old enemy sprite. */
+const spellsOf = (element: Element): Spell[] => PLAYER_SPELLS.filter((s) => s.element === element);
+
+/** The player's party — all four fight; each casts only its own two spells. */
 export const CREATURES: Creature[] = [
-  { name: "Cinder", element: "fire", textureKey: "fire" },
-  { name: "Ripple", element: "water", textureKey: "water" },
-  { name: "Dryad", element: "nature", textureKey: "nature" },
-  { name: "Shade", element: "shadow", textureKey: "enemy" },
+  { name: "Cinder", element: "fire", textureKey: "fire", spells: spellsOf("fire") },
+  { name: "Ripple", element: "water", textureKey: "water", spells: spellsOf("water") },
+  { name: "Dryad", element: "nature", textureKey: "nature", spells: spellsOf("nature") },
+  { name: "Shade", element: "shadow", textureKey: "enemy", spells: spellsOf("shadow") },
 ];
 
 export interface Combatant {

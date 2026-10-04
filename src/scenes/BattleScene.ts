@@ -11,7 +11,6 @@ import { sharedAudio } from "@audio/sharedAudio";
 import { sharedSound, handleSoundCommand } from "@audio/sharedSound";
 import { powerMultiplier, gaugeFill, GAUGE_TOP_RATIO, type PowerResult } from "@data/power";
 import {
-  PLAYER,
   PLAYER_SPELLS,
   ELEMENT_COLOR,
   ELEMENT_BONUS,
@@ -59,13 +58,23 @@ const COMBO_BONUS = 1.5;
 /** After the first spell is heard, wait this long for a second (combo). */
 const COMBO_WAIT_MS = 700;
 
+/** HP per party creature. */
+const CREATURE_MAX_HP = 80;
+
+interface PartyMember {
+  creature: Creature;
+  hp: number;
+  maxHp: number;
+  fainted: boolean;
+}
+
 /** Shout Power gauge geometry (vertical bar beside the player). */
 const GAUGE_X = 38;
 const GAUGE_BOTTOM = 410;
 const GAUGE_H = 232;
 const GAUGE_W = 18;
 
-type Turn = "idle" | "player" | "enemy" | "result" | "reward";
+type Turn = "idle" | "player" | "enemy" | "result" | "reward" | "faint";
 
 /** Signature move cadence and tuning. */
 const SIGNATURE_EVERY = 3;
@@ -117,10 +126,14 @@ export class BattleScene extends Phaser.Scene {
   // two cast as a combo.
   private pendingSpells: Spell[] = [];
   private pendingTimer?: Phaser.Time.TimerEvent;
-  /** Chosen on the select screen; its element gets the damage bonus. */
-  private chosenCreature: Creature = CREATURES[0];
-
-  private playerHp = PLAYER.maxHp;
+  /** The creature chosen on the select screen — starts active. */
+  private startCreature: Creature = CREATURES[0];
+  /** The party: all four creatures, each with its own HP. */
+  private party: PartyMember[] = [];
+  private activeIndex = 0;
+  private playerShadow?: Phaser.GameObjects.Ellipse;
+  private playerGuard = false;
+  private portraits: { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle; icon: Phaser.GameObjects.Arc; label: Phaser.GameObjects.Text }[] = [];
 
   // Gauntlet state.
   private gauntlet: EnemyDef[] = [];
@@ -207,7 +220,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   init(data: { creature?: Creature }): void {
-    if (data?.creature) this.chosenCreature = data.creature;
+    if (data?.creature) this.startCreature = data.creature;
   }
 
   preload(): void {
@@ -238,10 +251,15 @@ export class BattleScene extends Phaser.Scene {
     const centerY = GROUND_Y - CREATURE_H / 2;
     this.anim = new AnimationsModule(this);
 
+    // Build the party; the chosen creature starts active, the rest wait.
+    this.party = CREATURES.map((c) => ({ creature: c, hp: CREATURE_MAX_HP, maxHp: CREATURE_MAX_HP, fainted: false }));
+    this.activeIndex = Math.max(0, CREATURES.findIndex((c) => c.name === this.startCreature.name));
+
     this.playerBaseX = 235;
     this.playerPos = { x: this.playerBaseX, y: centerY };
-    const player = placeCreature(this, { key: this.chosenCreature.textureKey, x: this.playerBaseX, side: "player" });
+    const player = placeCreature(this, { key: this.activeCreature().textureKey, x: this.playerBaseX, side: "player" });
     this.playerShape = player.image;
+    this.playerShadow = player.shadow;
     this.playerView = this.anim.register(this.playerShape, 1, 0, 1);
     this.anim.startIdle(this.playerView);
 
@@ -253,9 +271,11 @@ export class BattleScene extends Phaser.Scene {
     this.createProgressIcons();
 
     // HP bars (the enemy's name/HP are filled in as each challenger spawns).
-    this.playerBar = this.createHpBar(50, 48, 340, this.chosenCreature.name, "left");
+    this.playerBar = this.createHpBar(50, 48, 340, this.activeCreature().name, "left");
     this.enemyBar = this.createHpBar(width - 50 - 340, 48, 340, "", "right");
-    this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, false);
+    this.updatePlayerHpBar(false);
+    this.setActiveSpells();
+    this.createPortraits();
 
     // Ultimate charge meter, under the player's HP bar.
     this.add.text(50, 70, "ULT", { fontFamily: "monospace", fontSize: "11px", color: "#ffd36b" }).setOrigin(0, 0);
@@ -443,46 +463,41 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
+  /** Two large cards for the active creature's own spells. */
   private createSpellCards(): void {
+    this.cardLayer.removeAll(true);
+    this.cards.clear();
     const { width } = this.scale;
-    const margin = 18;
-    const gap = 10;
-    const count = PLAYER_SPELLS.length;
-    const cardW = (width - margin * 2 - gap * (count - 1)) / count;
-    const cardH = 84;
-    const top = 408; // lifted so the bottom Wispr bar never covers the cards
+    const spells = this.activeCreature().spells;
+    const cardW = 250;
+    const cardH = 92;
+    const gap = 26;
+    const totalW = spells.length * cardW + (spells.length - 1) * gap;
+    const startX = width / 2 - totalW / 2;
+    const cy = 446; // kept above the bottom Wispr bar
 
-    PLAYER_SPELLS.forEach((spell, i) => {
-      const cx = margin + i * (cardW + gap) + cardW / 2;
-      const cy = top + cardH / 2;
+    spells.forEach((spell, i) => {
+      const cx = startX + i * (cardW + gap) + cardW / 2;
       const boosted = this.isBoosted(spell);
       const dmg = this.effectiveDamage(spell);
 
-      // Boosted cards get an element-coloured border to stand out.
       const bg = this.add
         .rectangle(cx, cy, cardW, cardH, 0x1e1b2e)
         .setStrokeStyle(boosted ? 3 : 2, boosted ? ELEMENT_COLOR[spell.element] : 0x3a3550);
-      const dot = this.add.circle(cx - cardW / 2 + 11, cy - cardH / 2 + 11, 5, ELEMENT_COLOR[spell.element]);
-      // wordWrap splits the two-word name across lines to fit the narrow card.
+      const dot = this.add.circle(cx - cardW / 2 + 18, cy - cardH / 2 + 16, 7, ELEMENT_COLOR[spell.element]);
       const name = this.add
-        .text(cx, cy - 10, spell.name, {
-          fontFamily: "monospace",
-          fontSize: "15px",
-          color: "#e9e4ff",
-          align: "center",
-          wordWrap: { width: cardW - 12 },
-        })
+        .text(cx, cy - 12, spell.name, { fontFamily: "monospace", fontSize: "24px", fontStyle: "bold", color: "#e9e4ff" })
         .setOrigin(0.5);
       const meta = this.add
-        .text(cx, cy + cardH / 2 - 13, boosted ? `${dmg} dmg +25%` : `${dmg} dmg`, {
+        .text(cx, cy + cardH / 2 - 15, boosted ? `${dmg} dmg +25%` : `${dmg} dmg`, {
           fontFamily: "monospace",
-          fontSize: "10px",
+          fontSize: "13px",
           color: boosted ? "#ffd36b" : "#9a92c7",
         })
         .setOrigin(0.5);
-      // Chain overlay shown when the spell is sealed by Blightroot's Root.
+      // Chain overlay shown when sealed by Blightroot's Root.
       const chain = this.add
-        .text(cx, cy, "⛓", { fontFamily: "monospace", fontSize: "30px", color: "#ffffff" })
+        .text(cx, cy, "⛓", { fontFamily: "monospace", fontSize: "44px", color: "#ffffff" })
         .setOrigin(0.5)
         .setVisible(false);
       this.cardLayer.add([bg, dot, name, meta, chain]);
@@ -517,10 +532,159 @@ export class BattleScene extends Phaser.Scene {
     this.progressLayer = this.add.container(0, 0, objs);
   }
 
-  /** Whether this spell gets the chosen creature's +25% bonus. Shadow is
+  /* --------------------------------------------------------------------- */
+  /* Party                                                                  */
+  /* --------------------------------------------------------------------- */
+
+  private active(): PartyMember {
+    return this.party[this.activeIndex];
+  }
+
+  private activeCreature(): Creature {
+    return this.active().creature;
+  }
+
+  private updatePlayerHpBar(animate: boolean): void {
+    this.playerBar.nameLabel.setText(this.activeCreature().name);
+    this.updateHpBar(this.playerBar, this.active().hp, this.active().maxHp, animate);
+  }
+
+  private refreshPlayerHp(animate: boolean): void {
+    this.updatePlayerHpBar(animate);
+    this.updatePortraits();
+  }
+
+  /** Point the matcher/cards at the active creature's two spells. */
+  private setActiveSpells(): void {
+    this.spellNames = this.activeCreature().spells.map((s) => s.name);
+    this.matcher = new Matcher(this.spellNames, { threshold: CAST_THRESHOLD });
+    this.createSpellCards();
+  }
+
+  private createPortraits(): void {
+    this.portraits.forEach((p) => {
+      p.bg.destroy();
+      p.fill.destroy();
+      p.icon.destroy();
+      p.label.destroy();
+    });
+    this.portraits = [];
+    this.party.forEach((m, i) => {
+      const x = 56 + i * 72;
+      const icon = this.add.circle(x, 98, 11, ELEMENT_COLOR[m.creature.element]).setStrokeStyle(2, 0x14121f);
+      const label = this.add
+        .text(x, 98, m.creature.name[0], { fontFamily: "monospace", fontSize: "12px", fontStyle: "bold", color: "#14121f" })
+        .setOrigin(0.5);
+      const bg = this.add.rectangle(x - 22, 116, 44, 6, 0x0f0d18).setOrigin(0, 0.5).setStrokeStyle(1, 0x3a3550);
+      const fill = this.add.rectangle(x - 21, 116, 42, 4, 0x58e39b).setOrigin(0, 0.5);
+      this.portraits.push({ bg, fill, icon, label });
+    });
+    this.updatePortraits();
+  }
+
+  private updatePortraits(): void {
+    this.party.forEach((m, i) => {
+      const p = this.portraits[i];
+      if (!p) return;
+      const frac = Math.max(0, m.hp) / m.maxHp;
+      p.fill.width = 42 * frac;
+      p.fill.setFillStyle(frac > 0.3 ? 0x58e39b : 0xff6b4a);
+      const activeOne = i === this.activeIndex && !m.fainted;
+      p.icon.setStrokeStyle(activeOne ? 3 : 2, activeOne ? 0xffd36b : 0x14121f);
+      const alpha = m.fainted ? 0.35 : 1;
+      p.icon.setAlpha(alpha);
+      p.label.setAlpha(alpha);
+      p.bg.setAlpha(alpha);
+      p.fill.setAlpha(alpha);
+    });
+  }
+
+  /** Switch the active creature: new sprite, HP bar, spells and cards. */
+  private switchTo(index: number, fromFaint: boolean): void {
+    this.activeIndex = index;
+    this.playerGuard = false;
+
+    this.anim.stopIdle(this.playerView);
+    this.playerShape.destroy();
+    this.playerShadow?.destroy();
+    const spawned = placeCreature(this, { key: this.activeCreature().textureKey, x: this.playerBaseX, side: "player" });
+    this.playerShape = spawned.image;
+    this.playerShadow = spawned.shadow;
+    this.playerView = this.anim.register(this.playerShape, 1, 0, 1);
+    this.anim.startIdle(this.playerView);
+
+    this.setActiveSpells();
+    this.refreshPlayerHp(false);
+    sharedSound.blip(620);
+
+    if (fromFaint) {
+      this.startPlayerTurn();
+    } else {
+      // A voluntary switch uses the turn.
+      this.turn = "idle";
+      this.castLine.setText(`Switched to ${this.activeCreature().name}`);
+      this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+    }
+  }
+
+  /** Guard uses the turn and halves the next incoming hit. */
+  private guard(): void {
+    this.playerGuard = true;
+    this.castThisTurn = true;
+    this.turn = "idle";
+    this.announceTurn("GUARD", "#4aa8ff");
+    this.castLine.setText(`${this.activeCreature().name} guards`);
+    sharedSound.blip(500);
+    this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
+  }
+
+  /** The active creature fainted: forced free switch, or run over. */
+  private handleFaint(): void {
+    this.active().fainted = true;
+    this.updatePortraits();
+    const alive = this.party.filter((m) => !m.fainted);
+    if (alive.length === 0) {
+      this.showResult(false);
+      return;
+    }
+    this.turn = "faint";
+    this.setCardsEnabled(false);
+    const names = alive.map((m) => m.creature.name).join(", ");
+    this.banner.setText(`${this.activeCreature().name} fainted — say a name: ${names}`);
+    this.announceTurn("FAINTED", "#ff6b4a");
+  }
+
+  /** Handle player-turn voice commands (guard / switch). Returns true if used. */
+  private handlePlayerCommand(text: string): boolean {
+    if (heardCommand(new Matcher(["guard", "defend", "block"], { threshold: 0.6 }), text)) {
+      this.guard();
+      return true;
+    }
+    // "switch to <name>" — needs a switch word plus a reserve creature's name.
+    if (heardCommand(new Matcher(["switch", "swap", "change"], { threshold: 0.6 }), text)) {
+      const idx = this.reserveIndexFrom(text);
+      if (idx >= 0) {
+        this.switchTo(idx, false);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Index of a non-active, non-fainted party creature named in the text. */
+  private reserveIndexFrom(text: string): number {
+    const names = this.party.map((m) => m.creature.name);
+    const m = matchCommand(new Matcher(names, { threshold: 0.6 }), text);
+    if (!m) return -1;
+    const idx = this.party.findIndex((p) => p.creature.name === m.phrase);
+    if (idx < 0 || idx === this.activeIndex || this.party[idx].fainted) return -1;
+    return idx;
+  }
+
+  /** Whether this spell gets the active creature's +25% bonus. Shadow is
    *  neutral, so no creature ever boosts (or is boosted on) shadow. */
   private isBoosted(spell: Spell): boolean {
-    return spell.element === this.chosenCreature.element && this.chosenCreature.element !== "shadow";
+    return spell.element === this.activeCreature().element && this.activeCreature().element !== "shadow";
   }
 
   /** Spell damage after the chosen creature's same-element +25% bonus (cards). */
@@ -617,8 +781,10 @@ export class BattleScene extends Phaser.Scene {
     this.clearSeal();
 
     if (heal) {
-      this.playerHp = Math.min(PLAYER.maxHp, this.playerHp + Math.round(PLAYER.maxHp * HEAL_FRACTION));
-      this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+      this.party.forEach((m) => {
+        if (!m.fainted) m.hp = Math.min(m.maxHp, m.hp + Math.round(m.maxHp * HEAL_FRACTION));
+      });
+      this.refreshPlayerHp(true);
     }
 
     // Spawn sprite (fall back to the element's creature art if the file is
@@ -739,6 +905,14 @@ export class BattleScene extends Phaser.Scene {
       return;
     }
 
+    // After a faint: say a reserve creature's name to send it out (free).
+    if (this.turn === "faint") {
+      this.heardLine.setText(`Heard: ${text ? `“${text}”` : "—"}`);
+      const idx = this.reserveIndexFrom(text);
+      if (idx >= 0) this.switchTo(idx, true);
+      return;
+    }
+
     // Only the player's turn listens — all input is ignored otherwise.
     if (this.turn !== "player") return;
 
@@ -753,6 +927,9 @@ export class BattleScene extends Phaser.Scene {
       }
       return;
     }
+
+    // Guard or switch (each uses the turn).
+    if (!this.castThisTurn && this.handlePlayerCommand(text)) return;
 
     // Cast only from a committed phrase, once per turn — so one utterance can't
     // cast twice and a stale transcript can't re-trigger.
@@ -988,12 +1165,12 @@ export class BattleScene extends Phaser.Scene {
     // Burn ticks at the start of each of the player's turns.
     if (this.playerBurn > 0) {
       this.playerBurn -= 1;
-      this.playerHp = Math.max(0, this.playerHp - BURN_DMG);
-      this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+      this.active().hp = Math.max(0, this.active().hp - BURN_DMG);
+      this.refreshPlayerHp(true);
       this.anim.floatingDamage(this.playerPos.x, this.playerPos.y - 90, BURN_DMG);
       sharedSound.impact(BURN_DMG);
-      if (this.playerHp <= 0) {
-        this.showResult(false);
+      if (this.active().hp <= 0) {
+        this.handleFaint();
         return;
       }
     }
@@ -1139,8 +1316,10 @@ export class BattleScene extends Phaser.Scene {
         if (opt.element) this.furyMult[opt.element] = (this.furyMult[opt.element] ?? 1) * FURY_MULT;
         break;
       case "mend":
-        this.playerHp = Math.min(PLAYER.maxHp, this.playerHp + Math.round(PLAYER.maxHp * MEND_FRACTION));
-        this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
+        this.party.forEach((m) => {
+          if (!m.fainted) m.hp = Math.min(m.maxHp, m.hp + Math.round(m.maxHp * MEND_FRACTION));
+        });
+        this.refreshPlayerHp(true);
         break;
       case "surge":
         this.ultCharge = Math.max(this.ultCharge, SURGE_CHARGE);
@@ -1240,7 +1419,7 @@ export class BattleScene extends Phaser.Scene {
         this.castLine.setText(`${def.name} raises Tide Shield!`);
         break;
       case "root": {
-        const spell = Phaser.Utils.Array.GetRandom(PLAYER_SPELLS) as Spell;
+        const spell = Phaser.Utils.Array.GetRandom(this.activeCreature().spells) as Spell;
         this.sealedSpell = spell.name;
         this.castLine.setText(`${def.name} uses Root! ${spell.name} sealed.`);
         break;
@@ -1319,30 +1498,52 @@ export class BattleScene extends Phaser.Scene {
     this.tweens.add({ targets: t, y: t.y - 36, alpha: 0, duration: 700, onComplete: () => t.destroy() });
   }
 
+  private showGuarded(): void {
+    const t = this.add
+      .text(this.playerPos.x, this.playerPos.y - 120, "GUARDED", {
+        fontFamily: "monospace",
+        fontSize: "22px",
+        fontStyle: "bold",
+        color: "#4aa8ff",
+      })
+      .setOrigin(0.5)
+      .setDepth(72);
+    this.tweens.add({ targets: t, y: t.y - 36, alpha: 0, duration: 700, onComplete: () => t.destroy() });
+  }
+
   /** A generic enemy strike (used by normal attacks and Cataclysm). */
   private enemyStrike(dmg: number, element: Element, effMult?: number): void {
-    const lethal = this.playerHp - dmg <= 0;
+    let finalDmg = dmg;
+    let guarded = false;
+    if (this.playerGuard) {
+      this.playerGuard = false;
+      finalDmg = Math.max(1, Math.round(dmg * 0.5));
+      guarded = true;
+    }
+    const lethal = this.active().hp - finalDmg <= 0;
+
     this.anim.attack(this.enemyView, () => {
       if (lethal) this.anim.setSlowMo(0.4);
       sharedSound.whoosh(element);
       this.effects.launchProjectile(element, this.enemyPos, this.playerPos, PROJECTILE_MS, () => {
-        this.playerHp = Math.max(0, this.playerHp - dmg);
-        this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, true);
-        this.effects.cameraHit(dmg);
-        sharedSound.impact(dmg);
+        this.active().hp = Math.max(0, this.active().hp - finalDmg);
+        this.refreshPlayerHp(true);
+        this.effects.cameraHit(finalDmg);
+        sharedSound.impact(finalDmg);
+        if (guarded) this.showGuarded();
         if (effMult !== undefined) this.showEffectiveness(effMult, this.playerPos.x, this.playerPos.y - 120);
 
-        if (this.playerHp <= 0) {
-          this.anim.hit(this.playerView, dmg, {
+        if (this.active().hp <= 0) {
+          this.anim.hit(this.playerView, finalDmg, {
             resumeIdle: false,
             onComplete: () => {
               this.anim.setSlowMo(1);
-              this.anim.defeat(this.playerView, this.enemyView, () => this.showResult(false));
+              this.anim.defeat(this.playerView, this.enemyView, () => this.handleFaint());
             },
           });
           return;
         }
-        this.anim.hit(this.playerView, dmg);
+        this.anim.hit(this.playerView, finalDmg);
         this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startPlayerTurn());
       });
     });
@@ -1350,7 +1551,7 @@ export class BattleScene extends Phaser.Scene {
 
   private enemyAttack(attack: Spell, element: Element): void {
     this.castLine.setText(`${this.enemyDef.name} cast ${attack.name}`);
-    const mult = typeMultiplier(element, this.chosenCreature.element);
+    const mult = typeMultiplier(element, this.activeCreature().element);
     const dmg = Math.max(1, Math.round(attack.damage * GAUNTLET_DMG[this.enemyIndex] * mult));
     this.enemyStrike(dmg, element, mult);
   }
@@ -1510,8 +1711,13 @@ export class BattleScene extends Phaser.Scene {
     this.resultHeard = undefined;
 
     this.turn = "idle";
-    this.playerHp = PLAYER.maxHp;
-    this.updateHpBar(this.playerBar, this.playerHp, PLAYER.maxHp, false);
+    // Reset the whole party and return to the chosen starter.
+    this.party.forEach((m) => {
+      m.hp = m.maxHp;
+      m.fainted = false;
+    });
+    this.activeIndex = Math.max(0, CREATURES.findIndex((c) => c.name === this.startCreature.name));
+    this.playerGuard = false;
 
     this.turnsTaken = 0;
     this.defeatedCount = 0;
@@ -1531,8 +1737,17 @@ export class BattleScene extends Phaser.Scene {
     this.rewardMatcher = undefined;
     this.clearStatusLines();
 
-    // Restore the player from any defeat state (grey/toppled/faded).
-    this.anim.reset(this.playerView);
+    // Respawn the starter's sprite fresh (the old one may be toppled/faded).
+    this.anim.stopIdle(this.playerView);
+    this.playerShape.destroy();
+    this.playerShadow?.destroy();
+    const respawn = placeCreature(this, { key: this.activeCreature().textureKey, x: this.playerBaseX, side: "player" });
+    this.playerShape = respawn.image;
+    this.playerShadow = respawn.shadow;
+    this.playerView = this.anim.register(this.playerShape, 1, 0, 1);
+    this.anim.startIdle(this.playerView);
+    this.setActiveSpells();
+    this.refreshPlayerHp(false);
 
     // Fresh gauntlet order, back to the first challenger (spawnEnemy clears the
     // current enemy sprite).
