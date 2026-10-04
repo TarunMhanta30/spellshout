@@ -23,9 +23,11 @@ export class HelpOverlay {
     this.el.innerHTML = `
       <h2 style="color:#b79cff;margin:0 0 12px">VOICE COMMANDS</h2>
       <ul style="font-size:clamp(14px,2vw,20px);line-height:1.9;list-style:none;padding:0;margin:0">
-        <li><b style="color:#ffd36b">Say a spell name</b> — cast it (say two names for a combo)</li>
+        <li><b style="color:#ffd36b">Creatures:</b> Blaze (fire), Aqua (water), Grove (nature), Ghost (shadow)</li>
+        <li><b style="color:#ffd36b">Say a spell name</b> — cast it (say two normal spells for a combo)</li>
+        <li><b style="color:#ffd36b">Mega / heal</b> — unlock after 4 / 3 normal attacks, then say their name</li>
         <li><b style="color:#ffd36b">When ULTIMATE READY</b> — describe your attack in one sentence</li>
-        <li><b style="color:#ffd36b">"switch to &lt;name&gt;"</b> — change creature (uses your turn)</li>
+        <li><b style="color:#ffd36b">"switch to Aqua"</b> — change creature by name (uses your turn)</li>
         <li><b style="color:#ffd36b">"guard"</b> — halve the next hit (uses your turn)</li>
         <li><b style="color:#ffd36b">"rematch"</b> — play again (on the result screen)</li>
         <li><b style="color:#ffd36b">"whisper mode" / "chrome mode"</b> — switch voice engine (title)</li>

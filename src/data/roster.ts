@@ -7,11 +7,23 @@
 
 export type Element = "fire" | "water" | "nature" | "void" | "shadow";
 
+/** A spell is a normal attack, the creature's locked mega, or its locked heal. */
+export type SpellKind = "normal" | "mega" | "heal";
+
 export interface Spell {
   name: string;
   element: Element;
+  /** Attack damage (normal 14–20, mega 35). Heals carry 0 and heal by fraction. */
   damage: number;
+  kind: SpellKind;
 }
+
+/** Mega deals a flat 35; a heal restores this fraction of the caster's max HP. */
+export const MEGA_DAMAGE = 35;
+export const HEAL_FRACTION_OF_MAX = 0.3;
+/** Normal attacks a creature must land before its mega / heal unlocks. */
+export const MEGA_UNLOCK_AT = 4;
+export const HEAL_UNLOCK_AT = 3;
 
 /**
  * The direction each sprite's art natively faces. The humanoid player set faces
@@ -38,19 +50,6 @@ export const ELEMENT_COLOR: Record<Element, number> = {
   shadow: 0x9a92c7,
 };
 
-/** The player's spellbook — every creature's spells combined. Shadow spells are
- *  neutral: they never get (or suffer) an element bonus. */
-export const PLAYER_SPELLS: Spell[] = [
-  { name: "Molten Fang", element: "fire", damage: 18 },
-  { name: "Ashen Roar", element: "fire", damage: 14 },
-  { name: "Tidal Crush", element: "water", damage: 18 },
-  { name: "Frozen Vault", element: "water", damage: 14 },
-  { name: "Thorn Whip", element: "nature", damage: 16 },
-  { name: "Bramble Snare", element: "nature", damage: 15 },
-  { name: "Dusk Veil", element: "shadow", damage: 16 },
-  { name: "Hollow Gaze", element: "shadow", damage: 15 },
-];
-
 /** Damage multiplier a creature gets on spells of its own element. */
 export const ELEMENT_BONUS = 1.25;
 
@@ -59,19 +58,76 @@ export interface Creature {
   element: Element;
   /** Texture key for the creature's sprite (also its art filename stem). */
   textureKey: string;
-  /** This creature's own two spells (all it can cast). */
+  /** This creature's own six spells: four normals, one mega, one heal. */
   spells: Spell[];
 }
 
-const spellsOf = (element: Element): Spell[] => PLAYER_SPELLS.filter((s) => s.element === element);
+/** Build a creature's six spells: four normal attacks, a mega, and a heal, all
+ *  of the creature's own element. Shadow is neutral (no element bonus). */
+function makeSpells(
+  element: Element,
+  normals: [string, number][],
+  mega: string,
+  heal: string,
+): Spell[] {
+  return [
+    ...normals.map(([name, damage]) => ({ name, element, damage, kind: "normal" as const })),
+    { name: mega, element, damage: MEGA_DAMAGE, kind: "mega" as const },
+    { name: heal, element, damage: 0, kind: "heal" as const },
+  ];
+}
 
-/** The player's party — all four fight; each casts only its own two spells. */
+/** The player's party — all four fight; each casts only its own six spells. */
 export const CREATURES: Creature[] = [
-  { name: "Cinder", element: "fire", textureKey: "fire", spells: spellsOf("fire") },
-  { name: "Ripple", element: "water", textureKey: "water", spells: spellsOf("water") },
-  { name: "Dryad", element: "nature", textureKey: "nature", spells: spellsOf("nature") },
-  { name: "Shade", element: "shadow", textureKey: "enemy", spells: spellsOf("shadow") },
+  {
+    name: "Blaze",
+    element: "fire",
+    textureKey: "fire",
+    spells: makeSpells(
+      "fire",
+      [["Fire Punch", 18], ["Hot Rock", 16], ["Smoke Bomb", 14], ["Lava Kick", 20]],
+      "Sun Strike",
+      "Warm Glow",
+    ),
+  },
+  {
+    name: "Aqua",
+    element: "water",
+    textureKey: "water",
+    spells: makeSpells(
+      "water",
+      [["Water Gun", 18], ["Ice Ball", 16], ["Rain Drop", 14], ["Bubble Shot", 20]],
+      "Big Wave",
+      "Fresh Spring",
+    ),
+  },
+  {
+    name: "Grove",
+    element: "nature",
+    textureKey: "nature",
+    spells: makeSpells(
+      "nature",
+      [["Leaf Blade", 18], ["Root Grab", 16], ["Thorn Shot", 14], ["Vine Whip", 20]],
+      "Earth Quake",
+      "Flower Bloom",
+    ),
+  },
+  {
+    name: "Ghost",
+    element: "shadow",
+    textureKey: "enemy",
+    spells: makeSpells(
+      "shadow",
+      [["Dark Claw", 18], ["Night Bite", 16], ["Moon Slash", 20], ["Shadow Kick", 14]],
+      "Black Hole",
+      "Deep Sleep",
+    ),
+  },
 ];
+
+/** The player's spellbook — every creature's spells combined. Shadow spells are
+ *  neutral: they never get (or suffer) an element bonus. */
+export const PLAYER_SPELLS: Spell[] = CREATURES.flatMap((c) => c.spells);
 
 export interface Combatant {
   name: string;
@@ -92,8 +148,8 @@ export const ENEMY: Combatant = {
   color: 0x8b5cf6,
   maxHp: 100,
   spells: [
-    { name: "Void Shriek", element: "void", damage: 16 },
-    { name: "Night Gloom", element: "void", damage: 12 },
+    { name: "Void Shriek", element: "void", damage: 16, kind: "normal" },
+    { name: "Night Gloom", element: "void", damage: 12, kind: "normal" },
   ],
 };
 
@@ -136,16 +192,16 @@ export const SHIFT_ELEMENTS: Array<"fire" | "water" | "nature"> = ["fire", "wate
 /** Attack projectiles an enemy throws, keyed by its (current) element. */
 export const ENEMY_ATTACKS: Record<"fire" | "water" | "nature", Spell[]> = {
   fire: [
-    { name: "Flame Lash", element: "fire", damage: 14 },
-    { name: "Ember Burst", element: "fire", damage: 12 },
+    { name: "Flame Lash", element: "fire", damage: 14, kind: "normal" },
+    { name: "Ember Burst", element: "fire", damage: 12, kind: "normal" },
   ],
   water: [
-    { name: "Wave Slam", element: "water", damage: 14 },
-    { name: "Frost Bite", element: "water", damage: 12 },
+    { name: "Wave Slam", element: "water", damage: 14, kind: "normal" },
+    { name: "Frost Bite", element: "water", damage: 12, kind: "normal" },
   ],
   nature: [
-    { name: "Vine Lash", element: "nature", damage: 14 },
-    { name: "Spore Blast", element: "nature", damage: 12 },
+    { name: "Vine Lash", element: "nature", damage: 14, kind: "normal" },
+    { name: "Spore Blast", element: "nature", damage: 12, kind: "normal" },
   ],
 };
 
