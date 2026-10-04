@@ -30,6 +30,7 @@ import {
   type Signature,
   type Element,
 } from "@data/roster";
+import { computeHitDamage, MIN_HIT_DAMAGE } from "@data/damage";
 
 /** Confidence needed to fire a cast from a (possibly rough) interim result. */
 const CAST_THRESHOLD = 0.7;
@@ -161,10 +162,13 @@ export class BattleScene extends Phaser.Scene {
   private enemyTurnCount = 0;
   private playerBurn = 0;
   private enemyShield = false;
+  /** Player turns the Tide Shield still halves hits for (0 = down). */
+  private tideTurns = 0;
   private sealedSpell: string | null = null;
   private cataclysmCountdown = 0;
   private cataclysmLabel?: Phaser.GameObjects.Text;
   private warnText?: Phaser.GameObjects.Text;
+  private tideBanner?: Phaser.GameObjects.Text;
   private turnStartTime = 0;
 
   // Run-long upgrades.
@@ -826,13 +830,6 @@ export class BattleScene extends Phaser.Scene {
     return this.isBoosted(spell) ? Math.round(spell.damage * ELEMENT_BONUS) : spell.damage;
   }
 
-  /** Base damage before type/power/quick: creature +25% and any Fury bonus. */
-  private spellBase(spell: Spell): number {
-    const creature = this.isBoosted(spell) ? ELEMENT_BONUS : 1;
-    const fury = this.furyMult[spell.element] ?? 1;
-    return spell.damage * creature * fury;
-  }
-
   private quickBonus(): number {
     return this.time.now - this.turnStartTime <= QUICK_MS ? QUICK_BONUS : 1;
   }
@@ -906,6 +903,8 @@ export class BattleScene extends Phaser.Scene {
     // Reset per-fight signature / status state.
     this.enemyTurnCount = 0;
     this.enemyShield = false;
+    this.tideTurns = 0;
+    this.hideTideBanner();
     this.cataclysmCountdown = 0;
     this.playerBurn = 0;
     this.cataclysmLabel?.destroy();
@@ -1122,11 +1121,6 @@ export class BattleScene extends Phaser.Scene {
     return names.map((n) => PLAYER_SPELLS.find((s) => s.name === n)).filter((s): s is Spell => !!s);
   }
 
-  /** Spell damage after creature/Fury base and the elemental type multiplier. */
-  private spellDamage(spell: Spell): number {
-    return Math.max(1, Math.round(this.spellBase(spell) * typeMultiplier(spell.element, this.enemyElement())));
-  }
-
   /** Cast two normal attacks at once: combined damage × COMBO_BONUS, with a
    *  banner. Both count toward the mega / heal unlocks. */
   private comboCast(a: Spell, b: Spell): void {
@@ -1139,15 +1133,37 @@ export class BattleScene extends Phaser.Scene {
 
     const power = this.shoutPower();
     const quick = this.quickBonus();
-    const dmg = Math.max(1, Math.round((this.spellDamage(a) + this.spellDamage(b)) * this.comboBonus * power.mult * quick));
+    // Each normal is scored on its own (type chart, creature bonus, Fury, the
+    // Tide Shield), then the two are summed and the combo bonus / power / quick
+    // applied. Never zero (floored).
+    const hitA = computeHitDamage({
+      base: a.damage,
+      kind: "normal",
+      attack: a.element,
+      defender: this.enemyElement(),
+      boosted: this.isBoosted(a),
+      shieldUp: this.enemyShield,
+      furyMult: this.furyMult[a.element] ?? 1,
+    });
+    const hitB = computeHitDamage({
+      base: b.damage,
+      kind: "normal",
+      attack: b.element,
+      defender: this.enemyElement(),
+      boosted: this.isBoosted(b),
+      shieldUp: this.enemyShield,
+      furyMult: this.furyMult[b.element] ?? 1,
+    });
+    const dmg = Math.max(MIN_HIT_DAMAGE, Math.round((hitA.damage + hitB.damage) * this.comboBonus * power.mult * quick));
+    const superEff = hitA.superEffective || hitB.superEffective;
+    const brokeShield = hitA.brokeShield || hitB.brokeShield;
+    const shieldHalved = (hitA.shieldHalved || hitB.shieldHalved) && !brokeShield;
     this.castLine.setText(`Combo! ${a.name} + ${b.name}  ×${power.mult}`);
     if (!this.strongestHit || dmg > this.strongestHit.damage) {
       this.strongestHit = { name: `${a.name} + ${b.name}`, damage: dmg };
     }
     this.announceTurn("COMBO", "#ff6bd6");
 
-    const superEff =
-      typeMultiplier(a.element, this.enemyElement()) === 2 || typeMultiplier(b.element, this.enemyElement()) === 2;
     const lethal = this.enemyHp - dmg <= 0;
     const els: Element[] = [a.element, b.element];
 
@@ -1163,20 +1179,14 @@ export class BattleScene extends Phaser.Scene {
           sharedSound.whoosh(el);
           this.effects.launchProjectile(el, this.playerPos, this.enemyPos, PROJECTILE_MS, () => {
             if (!last) return;
-            if (this.shieldBlocks(superEff)) {
-              this.anim.setSlowMo(1);
-              this.showBlocked();
-              sharedSound.impact(2);
-              this.anim.hit(this.enemyView, 2);
-              this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
-              return;
-            }
             this.enemyHp = Math.max(0, this.enemyHp - dmg);
             this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
             this.effects.cameraHit(dmg, power.crit);
             sharedSound.impact(dmg);
             this.showPower(power);
             if (quick > 1) this.showQuick();
+            if (brokeShield) this.breakTideShield();
+            else if (shieldHalved) this.showShieldHalf();
             if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
             this.recordHit(dmg, power.crit, superEff);
             this.addUltCharge(ULT_CHARGE_PER_HIT);
@@ -1228,7 +1238,7 @@ export class BattleScene extends Phaser.Scene {
 
     const score = scoreUltimate(sentence);
     const elements = (score.elements.length ? score.elements : ["fire"]) as Element[];
-    const dmg = Math.max(1, score.damage);
+    const dmg = Math.max(MIN_HIT_DAMAGE, score.damage);
 
     this.ultCharge = 0;
     this.updateUltMeter();
@@ -1316,6 +1326,16 @@ export class BattleScene extends Phaser.Scene {
     this.peakLoudness = 0; // peak is per utterance / since last cast
     this.turnStartTime = this.time.now; // for Quick Cast
     this.heardLine.setText("Heard: —");
+    // Tide Shield lasts two player turns: consume one now, drop it when spent.
+    if (this.enemyShield) {
+      if (this.tideTurns <= 0) {
+        this.enemyShield = false;
+        this.hideTideBanner();
+      } else {
+        this.tideTurns -= 1;
+        this.showTideBanner();
+      }
+    }
     // Rebuild the cards so lock state and "unlocks in N" reflect this creature's
     // current counters, then apply seal/lock dimming.
     this.createSpellCards();
@@ -1371,19 +1391,35 @@ export class BattleScene extends Phaser.Scene {
     if (isMega) this.active().megaUsed = 0; // locks again after use
     else this.registerNormalUse(1);
 
-    // Creature +25% + Fury, type multiplier, Shout Power, then Quick Cast.
-    const mult = typeMultiplier(spell.element, this.enemyElement());
+    // Single source of truth for the number (see @data/damage): type chart,
+    // creature +25% on own-element normals, Fury, Shout Power, Quick Cast, the
+    // Tide Shield (halves non-super hits; mega ignores it), and the floors.
     const power = this.shoutPower();
     const quick = this.quickBonus();
-    const dmg = Math.max(1, Math.round(this.spellBase(spell) * mult * power.mult * quick));
+    const hit = computeHitDamage({
+      base: spell.damage,
+      kind: spell.kind,
+      attack: spell.element,
+      defender: this.enemyElement(),
+      boosted: this.isBoosted(spell),
+      shieldUp: this.enemyShield,
+      powerMult: power.mult,
+      quickMult: quick,
+      furyMult: this.furyMult[spell.element] ?? 1,
+    });
+    const dmg = hit.damage;
+    const mult = hit.multiplier;
+    const superEff = hit.superEffective;
     this.castLine.setText(`${isMega ? "MEGA! " : "You cast "}${spell.name}  ×${power.mult}`);
 
     if (!this.strongestHit || dmg > this.strongestHit.damage) {
       this.strongestHit = { name: spell.name, damage: dmg };
     }
 
-    const superEff = mult === 2;
     const lethal = this.enemyHp - dmg <= 0;
+
+    // Mega is unmistakable: dim the screen and flash a big "MEGA!" banner.
+    if (isMega) this.playMegaIntro(spell);
 
     this.anim.attack(this.playerView, () => {
       if (lethal) this.anim.setSlowMo(0.4); // the killing blow lands in slow motion
@@ -1391,30 +1427,30 @@ export class BattleScene extends Phaser.Scene {
       if (isMega) {
         sharedSound.megaBoom();
         this.effects.screenFlash(255, 236, 150);
+        this.effects.cameraZoom(); // punchy zoom in
       }
       if (power.crit) {
         sharedSound.crit();
         this.effects.screenFlash(255, 200, 255);
       }
-      this.effects.launchProjectile(spell.element, this.playerPos, this.enemyPos, PROJECTILE_MS, () => {
-        if (this.shieldBlocks(superEff)) {
-          this.anim.setSlowMo(1);
-          this.showBlocked();
-          sharedSound.impact(2);
-          this.anim.hit(this.enemyView, 2);
-          this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
-          return;
-        }
-        this.enemyHp = Math.max(0, this.enemyHp - dmg);
-        this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
-        this.effects.cameraHit(dmg, power.crit);
-        sharedSound.impact(dmg);
-        this.showEffectiveness(mult, this.enemyPos.x, this.enemyPos.y - 120);
-        this.showPower(power);
-        if (quick > 1) this.showQuick();
-        if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
-        this.recordHit(dmg, power.crit, superEff);
-        this.addUltCharge(ULT_CHARGE_PER_HIT); // landing a hit charges the ultimate
+      this.effects.launchProjectile(
+        spell.element,
+        this.playerPos,
+        this.enemyPos,
+        PROJECTILE_MS,
+        () => {
+          this.enemyHp = Math.max(0, this.enemyHp - dmg);
+          this.updateHpBar(this.enemyBar, this.enemyHp, this.enemyMaxHp, true);
+          this.effects.cameraHit(dmg, power.crit || isMega);
+          sharedSound.impact(dmg);
+          this.showEffectiveness(mult, this.enemyPos.x, this.enemyPos.y - 120);
+          this.showPower(power);
+          if (quick > 1) this.showQuick();
+          if (hit.brokeShield) this.breakTideShield();
+          else if (hit.shieldHalved) this.showShieldHalf();
+          if (this.cataclysmCountdown > 0 && superEff && power.crit) this.interruptCataclysm();
+          this.recordHit(dmg, power.crit, superEff);
+          this.addUltCharge(ULT_CHARGE_PER_HIT); // landing a hit charges the ultimate
 
         if (lethal) {
           this.defeatedCount += 1;
@@ -1428,8 +1464,50 @@ export class BattleScene extends Phaser.Scene {
         }
         this.anim.hit(this.enemyView, dmg);
         this.time.delayedCall(RESOLVE_BEAT_MS, () => this.startEnemyTurn());
-      });
+        },
+        isMega ? 1.7 : 1, // megas throw a noticeably bigger projectile
+      );
     });
+  }
+
+  /** The unmistakable mega build-up: dim the arena and flash a big "MEGA!"
+   *  banner with the spell name. (The zoom, bigger projectile and heavy boom
+   *  fire from playerCast when the attack lands.) */
+  private playMegaIntro(spell: Spell): void {
+    const { width, height } = this.scale;
+
+    // Dim behind the projectile (depth 48) so the spell and banner pop.
+    const dim = this.add.rectangle(0, 0, width, height, 0x000000, 0.5).setOrigin(0, 0).setDepth(48).setAlpha(0);
+    this.tweens.add({ targets: dim, alpha: 1, duration: 150, yoyo: true, hold: 520, onComplete: () => dim.destroy() });
+
+    const banner = this.add
+      .text(width / 2, height / 2 - 36, "MEGA!", {
+        fontFamily: "monospace",
+        fontSize: "84px",
+        fontStyle: "bold",
+        color: "#ffd36b",
+        stroke: "#14121f",
+        strokeThickness: 8,
+      })
+      .setOrigin(0.5)
+      .setDepth(76)
+      .setScale(0.4)
+      .setAlpha(0);
+    this.tweens.add({ targets: banner, scale: 1, alpha: 1, duration: 200, ease: "Back.easeOut" });
+    this.tweens.add({ targets: banner, scale: 1.3, alpha: 0, delay: 640, duration: 320, onComplete: () => banner.destroy() });
+
+    const sub = this.add
+      .text(width / 2, height / 2 + 34, spell.name.toUpperCase(), {
+        fontFamily: "monospace",
+        fontSize: "26px",
+        fontStyle: "bold",
+        color: "#fff2b0",
+      })
+      .setOrigin(0.5)
+      .setDepth(76)
+      .setAlpha(0);
+    this.tweens.add({ targets: sub, alpha: 1, duration: 200 });
+    this.tweens.add({ targets: sub, alpha: 0, delay: 640, duration: 320, onComplete: () => sub.destroy() });
   }
 
   /** A heal mends the active creature for 30% of its max HP and ends the turn.
@@ -1667,7 +1745,7 @@ export class BattleScene extends Phaser.Scene {
       case "burn":
         return "GUARD blocks it; water is immune";
       case "tide":
-        return "break it with a super-effective hit";
+        return "hits halved; nature breaks it";
       case "root":
         return "SWITCH creatures to escape";
       case "cataclysm":
@@ -1715,7 +1793,9 @@ export class BattleScene extends Phaser.Scene {
         break;
       case "tide":
         this.enemyShield = true;
-        this.castLine.setText(`${def.name} raises Tide Shield!`);
+        this.tideTurns = 2; // halves non-super hits for the next two player turns
+        this.showTideBanner();
+        this.castLine.setText(`${def.name} raises Tide Shield! Hits halved — nature breaks it.`);
         break;
       case "root": {
         const spell = Phaser.Utils.Array.GetRandom(this.activeCreature().spells) as Spell;
@@ -1778,24 +1858,48 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
-  /** Tide Shield: only a super-effective hit breaks it. Non-super hits are
-   *  blocked and the shield stays up. Returns true if the hit was blocked. */
-  private shieldBlocks(superEffective: boolean): boolean {
-    if (!this.enemyShield) return false;
-    if (superEffective) {
-      this.enemyShield = false; // broken; the hit goes through
-      return false;
-    }
-    return true; // blocked; shield remains
+  /** Raise / lower the persistent Tide Shield banner. */
+  private showTideBanner(): void {
+    this.hideTideBanner();
+    this.tideBanner = this.add
+      .text(this.scale.width / 2, 150, "Tide Shield: hits halved, nature breaks it.", {
+        fontFamily: "monospace",
+        fontSize: "15px",
+        fontStyle: "bold",
+        color: "#14121f",
+        backgroundColor: "#4aa8ff",
+        padding: { x: 9, y: 4 },
+      })
+      .setOrigin(0.5)
+      .setDepth(62);
   }
 
-  private showBlocked(): void {
+  private hideTideBanner(): void {
+    this.tideBanner?.destroy();
+    this.tideBanner = undefined;
+  }
+
+  /** A super-effective (nature) hit breaks the Tide Shield outright. */
+  private breakTideShield(): void {
+    if (!this.enemyShield) return;
+    this.enemyShield = false;
+    this.tideTurns = 0;
+    this.hideTideBanner();
+    this.floatOverEnemy("SHIELD BROKEN", "#4aa8ff");
+  }
+
+  /** A non-super hit that the shield halved. */
+  private showShieldHalf(): void {
+    this.floatOverEnemy("HALVED", "#4aa8ff");
+  }
+
+  private floatOverEnemy(text: string, color: string): void {
     const t = this.add
-      .text(this.enemyPos.x, this.enemyPos.y - 120, "BLOCKED", {
+      .text(this.enemyPos.x, this.enemyPos.y - 120, text, {
         fontFamily: "monospace",
         fontSize: "22px",
         fontStyle: "bold",
-        color: "#4aa8ff",
+        color,
       })
       .setOrigin(0.5)
       .setDepth(72);
@@ -1821,9 +1925,10 @@ export class BattleScene extends Phaser.Scene {
     let guarded = false;
     if (this.playerGuard) {
       this.playerGuard = false;
-      finalDmg = Math.max(1, Math.round(dmg * 0.5));
+      finalDmg = Math.round(dmg * 0.5);
       guarded = true;
     }
+    finalDmg = Math.max(MIN_HIT_DAMAGE, finalDmg); // every hit lands for ≥ 5
     const lethal = this.active().hp - finalDmg <= 0;
 
     this.anim.attack(this.enemyView, () => {
@@ -1856,7 +1961,7 @@ export class BattleScene extends Phaser.Scene {
   private enemyAttack(attack: Spell, element: Element): void {
     this.castLine.setText(`${this.enemyDef.name} cast ${attack.name}`);
     const mult = typeMultiplier(element, this.activeCreature().element);
-    const dmg = Math.max(1, Math.round(attack.damage * GAUNTLET_DMG[this.enemyIndex] * mult));
+    const dmg = Math.max(MIN_HIT_DAMAGE, Math.round(attack.damage * GAUNTLET_DMG[this.enemyIndex] * mult));
     this.enemyStrike(dmg, element, mult);
   }
 

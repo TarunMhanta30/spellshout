@@ -89,24 +89,26 @@ export class EffectsModule {
 
   /* --------------------------- projectiles -------------------------- */
 
-  /** Launch an element-specific projectile from → to, then burst and onHit. */
+  /** Launch an element-specific projectile from → to, then burst and onHit.
+   *  `scale` (default 1) enlarges the whole projectile — megas use a bigger one. */
   launchProjectile(
     element: Element,
     from: { x: number; y: number },
     to: { x: number; y: number },
     duration: number,
     onHit: () => void,
+    scale = 1,
   ): void {
     const color = ELEMENT_COLOR[element];
-    const core = this.scene.add.image(from.x, from.y, "fx-soft").setTint(color).setDepth(50);
+    const core = this.scene.add.image(from.x, from.y, "fx-soft").setTint(color).setDepth(50).setScale(scale);
 
     let emitter: Phaser.GameObjects.Particles.ParticleEmitter;
     let wavy = false;
 
     switch (element) {
       case "fire":
-        core.setScale(1.5).setBlendMode(Phaser.BlendModes.ADD);
-        this.scene.tweens.add({ targets: core, scale: 1.85, duration: 110, yoyo: true, repeat: -1 });
+        core.setScale(1.5 * scale).setBlendMode(Phaser.BlendModes.ADD);
+        this.scene.tweens.add({ targets: core, scale: 1.85 * scale, duration: 110, yoyo: true, repeat: -1 });
         emitter = this.scene.add.particles(from.x, from.y, "fx-dot", {
           tint: [0xffd36b, 0xff8a3a, 0xff4a2a],
           speed: { min: 10, max: 55 },
@@ -121,7 +123,7 @@ export class EffectsModule {
         break;
 
       case "water":
-        core.setScale(1.5, 1.1).setBlendMode(Phaser.BlendModes.ADD);
+        core.setScale(1.5 * scale, 1.1 * scale).setBlendMode(Phaser.BlendModes.ADD);
         this.scene.tweens.add({ targets: core, angle: 360, duration: 480, repeat: -1 }); // spin
         emitter = this.scene.add.particles(from.x, from.y, "fx-dot", {
           tint: [0x9fd8ff, 0x4aa8ff, 0xffffff],
@@ -136,7 +138,7 @@ export class EffectsModule {
         break;
 
       case "nature":
-        core.setScale(1.25).setBlendMode(Phaser.BlendModes.ADD);
+        core.setScale(1.25 * scale).setBlendMode(Phaser.BlendModes.ADD);
         wavy = true; // the vine "whips" along a sine path
         emitter = this.scene.add.particles(from.x, from.y, "fx-leaf", {
           tint: [0x58e39b, 0x2fa864, 0x9be36b],
@@ -153,7 +155,7 @@ export class EffectsModule {
 
       case "void":
       default:
-        core.setScale(2.1).setAlpha(0.9).setTint(0x6b5a8f);
+        core.setScale(2.1 * scale).setAlpha(0.9).setTint(0x6b5a8f);
         emitter = this.scene.add.particles(from.x, from.y, "fx-soft", {
           tint: [0x3a2a5a, 0x5b4a7a, 0x2a2440],
           speed: { min: 8, max: 32 },
@@ -310,6 +312,13 @@ export class EffectsModule {
     const cam = this.scene.cameras.main;
     cam.zoomTo(1.06, 90, "Quad.easeOut");
     this.scene.time.delayedCall(110, () => cam.zoomTo(1, 220, "Quad.easeOut"));
+  }
+
+  /** A pronounced zoom-in that holds, then eases back — used for mega attacks. */
+  cameraZoom(factor = 1.14, holdMs = 420): void {
+    const cam = this.scene.cameras.main;
+    cam.zoomTo(factor, 160, "Quad.easeOut");
+    this.scene.time.delayedCall(holdMs, () => cam.zoomTo(1, 260, "Quad.easeOut"));
   }
 
   /* --------------------------- celebration -------------------------- */
